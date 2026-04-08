@@ -135,8 +135,17 @@ merged_label: shinobi:merged
 risky_label: shinobi:risky
 max_review_loops: 3
 max_commits_per_issue: 8
+max_changed_files: 20
+max_lines_changed: 800
+max_runtime_minutes: 30
 auto_merge: true
 use_draft_pr: true
+merge_method: squash
+high_risk_paths:
+  - migrations/
+  - infra/
+  - auth/
+  - billing/
 ```
 
 ## 停止条件

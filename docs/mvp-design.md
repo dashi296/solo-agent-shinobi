@@ -146,8 +146,8 @@ run
 停止条件:
 
 - Issue が closed
-- `shinobi:risky` が付いている
 - 既存 PR や branch が不整合
+- 実行中の別 mission と衝突する
 
 ### Phase 3: context
 
@@ -193,6 +193,7 @@ run
 - review loop 回数
 - 失敗テストの種類
 - high-risk path の有無
+- `shinobi:risky` label の有無
 
 ### Phase 6: merge
 
@@ -209,6 +210,8 @@ run
 - risky でない
 - review 上限未超過
 - issue scope を逸脱していない
+
+`shinobi:risky` が付いた Issue は実行対象からは外しません。MVP では「実装と PR 更新までは行うが、自動マージはせず `needs-human` に寄せる」扱いにします。
 
 ### Phase 7: finalize
 
@@ -234,6 +237,7 @@ ready -> working -> reviewing -> merged
 - `working` と `reviewing` は同時に付けない
 - `merged` と `blocked` は終端扱い
 - `risky` は補助属性であり phase ではない
+- `risky` は start を止める label ではなく、auto-merge を止める label として扱う
 
 ### ローカル state
 
@@ -419,36 +423,33 @@ high-risk path は config で追加可能にします。
 ```yaml
 repo: owner/repo
 main_branch: main
-labels:
-  ready: shinobi:ready
-  working: shinobi:working
-  reviewing: shinobi:reviewing
-  blocked: shinobi:blocked
-  needs_human: shinobi:needs-human
-  merged: shinobi:merged
-  risky: shinobi:risky
-limits:
-  max_review_loops: 3
-  max_commits_per_issue: 8
-  max_changed_files: 20
-  max_lines_changed: 800
-  max_runtime_minutes: 30
-merge:
-  auto_merge: true
-  draft_pr: true
-  method: squash
-safety:
-  high_risk_paths:
-    - migrations/
-    - infra/
-    - auth/
-    - billing/
+ready_label: shinobi:ready
+working_label: shinobi:working
+reviewing_label: shinobi:reviewing
+blocked_label: shinobi:blocked
+needs_human_label: shinobi:needs-human
+merged_label: shinobi:merged
+risky_label: shinobi:risky
+max_review_loops: 3
+max_commits_per_issue: 8
+max_changed_files: 20
+max_lines_changed: 800
+max_runtime_minutes: 30
+auto_merge: true
+use_draft_pr: true
+merge_method: squash
+high_risk_paths:
+  - migrations/
+  - infra/
+  - auth/
+  - billing/
 ```
 
 方針:
 
 - MVP では 1 repo 専用 config を前提にする
 - 環境変数は token や secret のみを扱う
+- `docs/product-spec.md` の flat schema を truth として維持する
 - label 名や上限値は config で変えられる
 
 ## エラーハンドリング方針
