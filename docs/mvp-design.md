@@ -130,7 +130,9 @@ run
 処理:
 
 - run 開始時に GitHub の Issue / PR / label 状態と `.shinobi/state.json` を reconciliation する
-- stale な active mission が state にだけ残っている場合は、GitHub の状態を優先して state を修復する
+- stale な active mission が state にだけ残っている場合は、それが `start` 未完了の local-only mission かを先に判定する
+- local-only mission で、対応する branch が存在し retry 可能なら、その branch と state を使って同じ mission を再開する
+- local-only mission でなく GitHub 上にも対応する active 状態が無い場合は、GitHub の状態を優先して state を修復する
 - GitHub 側に `shinobi:working` / `shinobi:reviewing` が残っている場合は lease と PR / branch の生存確認で stale 判定する
 - stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する
 - stale かつ再開不能なら、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
@@ -156,7 +158,8 @@ run
 
 fatal 時の補償動作:
 
-- branch 作成または state 更新後に GitHub 更新へ失敗した場合は local state を retryable に残す
+- branch 作成または state 更新後に GitHub 更新へ失敗した場合は、その mission を `start` 未完了の local-only mission として retryable に残す
+- local-only mission は次回 run の reconciliation で branch / issue 番号 / phase を照合して resume または cleanup 判定する
 - GitHub の active label 更新後に fatal が起きた場合は、active label を外して `shinobi:needs-human` を付け、fatal 理由を Issue に投稿する
 
 停止条件:
@@ -185,7 +188,8 @@ fatal 時の補償動作:
 処理:
 
 - 対象ファイルだけ編集する
-- 長時間処理に入る前と各 retry 後に lease heartbeat を更新する
+- execute 中は `mission_heartbeat_interval_minutes` ごとに定期 heartbeat を更新する
+- 長時間処理に入る前と各 retry 後にも即時 heartbeat を更新する
 - lint / typecheck / test を実行する
 - 必要なら修正を繰り返す
 - 変更要約を生成する
@@ -298,11 +302,11 @@ ready -> working -> reviewing -> merged
 
 - active mission は 0 か 1 のみ
 - 直近の完了または停止結果を `last_completed_mission` に保持する
-- state は再開補助であり truth ではない
+- state は再開補助であり truth ではないが、`start` 未完了の local-only mission を回復するための一次手掛かりとして扱う
 - GitHub 側と矛盾したら GitHub を優先する
 - run の先頭で reconciliation してから active mission 判定を行う
 - active mission には lease を持たせ、期限切れなら stale recovery 対象にする
-- lease は start / publish / review / retry / CI polling ごとに heartbeat 更新する
+- lease は execute 中の定期更新に加え、start / publish / review / retry / CI polling ごとに heartbeat 更新する
 
 ### ラベル遷移ルール
 
@@ -465,10 +469,12 @@ MVP では interrupted run からの自動回復をサポートします。
 
 - active label が付いた Issue を見つけたら、まず lease の期限切れ有無を確認する
 - lease が有効で、対応する PR または branch が存在する場合は active mission とみなし、新規 run は停止する
+- GitHub 上に active label が無くても、local-only mission の branch と state が残っている場合は cleanup 前に resume 可否を判定する
 - lease が期限切れでも、対応する PR または branch から state を再構築できる場合は、その mission を resume する
 - lease が期限切れで、PR / branch / 最新の Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
 - stale recovery を行ったときは Issue に recovery comment を残す
-- lease は phase 遷移時、retry 時、CI polling 中に heartbeat 更新される前提なので、期限切れは interruption の強いシグナルとして扱う
+- lease は execute 中の定期更新と、phase 遷移時、retry 時、CI polling 中の heartbeat 更新を前提にする
+- そのため lease 期限切れは interruption の強いシグナルとして扱う
 
 ### risk policy
 
