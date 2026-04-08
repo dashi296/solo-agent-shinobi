@@ -82,6 +82,7 @@ shinobi run --issue 123
 
 - `.shinobi/` ディレクトリを作る
 - `config.yml` の雛形を作る
+- workspace / installation ごとに一意な `agent_identity` を生成して `config.yml` へ書き込む
 - `.shinobi/summary.md` と `.shinobi/decisions.md` の空テンプレートを作る
 - 初回動作に必要な前提を表示する
 
@@ -137,11 +138,11 @@ run
 - `--issue` の対象に GitHub 上の active mission または local-only mission が残っていれば、その mission だけ resume 可否を判定する
 - `--issue` の対象以外に lease が生きている active mission または retryable な local-only mission が見つかった場合は、別 mission への横滑りを避けるため停止する
 - `--issue` がない場合だけ、stale な active mission が state にだけ残っているかを確認する
-- local-only mission で、対応する branch が存在し、state に `retryable_local_only: true` が残り、かつ state の `agent_identity` と現在設定が一致し、最後の Shinobi コメントまたは local log に retryable な `start` 失敗記録がある場合だけ、その branch と state を使って同じ mission を再開する
+- local-only mission で、対応する branch が存在し、state に `retryable_local_only: true` が残り、かつ state の `agent_identity` と現在設定の一意な `agent_identity` が一致し、最後の Shinobi コメントまたは local log に retryable な `start` 失敗記録がある場合だけ、その branch と state を使って同じ mission を再開する
 - local-only mission でなく GitHub 上にも対応する active 状態が無い場合は、GitHub の状態を優先して state を修復する
 - GitHub 側に `shinobi:working` / `shinobi:reviewing` が残っている場合は lease と PR / branch の生存確認で stale 判定する
-- stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する。ただし mission-state comment の `agent_identity` が現在設定と一致しない active mission は自分の mission とみなさない
-- lease が切れた stale mission は、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定と一致する場合に限って resume する
+- stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する。ただし mission-state comment の `agent_identity` が現在設定の一意な `agent_identity` と一致しない active mission は自分の mission とみなさない
+- lease が切れた stale mission は、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限って resume する
 - stale で、復元情報が不足するか整合しない場合は、branch や PR が残っていても自動 resume せず、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
 - `agent_identity` が欠損または不一致の active mission は ownership 不明として自動 cleanup せず、operator 向けコメント付きで `shinobi:needs-human` に寄せる
 - `--issue` がなければ `shinobi:ready` を優先度順で 1 件選ぶ
@@ -261,8 +262,8 @@ fatal 時の補償動作:
 処理:
 
 - Issue に完了または停止コメントを投稿する
-- label を `shinobi:merged` / `shinobi:blocked` / `shinobi:needs-human` に更新する
-- `shinobi:ready` `shinobi:working` `shinobi:reviewing` を必ず除去する
+- label を `shinobi:merged` / `shinobi:blocked` / `shinobi:needs-human` のいずれか 1 つに正規化して更新する
+- `shinobi:risky` を除く他の phase / 停止 / 完了 label は必ず除去する
 - issue を close するか、継続可能な状態に残す
 - `.shinobi/state.json` を完了状態へ更新する
 
@@ -288,6 +289,7 @@ needs-human -> ready
 - `risky` は start を止める label ではなく、auto-merge を止める label として扱う
 - `risky` は issue-level の manual merge 指示であり、high-risk path は publish 前でも停止しうる execution risk として扱う
 - `blocked` と `needs-human` は open issue 上の停止状態であり、人手で blocker 解消や要件補完を行った後に `ready` へ戻せる
+- `risky` を除く状態 label は常に 1 つだけ残るよう正規化する
 
 ### ローカル state
 
@@ -298,7 +300,7 @@ needs-human -> ready
   "active_issue_number": 123,
   "active_pr_number": 456,
   "active_branch": "feature/issue-123-login-form",
-  "agent_identity": "owner/repo#default",
+  "agent_identity": "owner/repo#default@mbp14-7f3a2c",
   "run_id": "20260409T100000-issue-123",
   "phase": "review",
   "review_loop_count": 1,
@@ -322,7 +324,7 @@ needs-human -> ready
 
 - active mission は 0 か 1 のみ
 - 直近の完了または停止結果を `last_completed_mission` に保持する
-- active mission には `agent_identity` を保持し、別の Shinobi instance や operator が残した mission を誤回収しないようにする
+- active mission には workspace / installation ごとに一意な `agent_identity` を保持し、別の Shinobi instance や operator が残した mission を誤回収しないようにする
 - active mission には `run_id` を保持し、local-only mission と stale recovery の同一性確認に使う
 - state は再開補助であり truth ではないが、`start` 未完了の local-only mission を回復するための一次手掛かりとして扱う
 - local-only mission の resume は state 単独では許可せず、`retryable_local_only` と Shinobi 自身が残した retryable 記録で裏付ける
@@ -335,12 +337,12 @@ needs-human -> ready
 
 各 phase で更新する label は次の通りです。
 
-- start: `shinobi:working` を付与し、`shinobi:ready` を除去する
-- publish: `shinobi:reviewing` を付与し、`shinobi:ready` と `shinobi:working` を除去する
-- pre-publish stop: `shinobi:blocked` または `shinobi:needs-human` を付与し、`shinobi:ready` と `shinobi:working` を除去する
-- finalize merged: `shinobi:merged` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
-- finalize blocked: `shinobi:blocked` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
-- finalize needs-human: `shinobi:needs-human` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
+- start: `shinobi:working` を付与し、`shinobi:risky` を除く他の状態 label を除去する
+- publish: `shinobi:reviewing` を付与し、`shinobi:risky` を除く他の状態 label を除去する
+- pre-publish stop: `shinobi:blocked` または `shinobi:needs-human` を付与し、`shinobi:risky` を除く他の状態 label を除去する
+- finalize merged: `shinobi:merged` を付与し、`shinobi:risky` を除く他の状態 label を除去する
+- finalize blocked: `shinobi:blocked` を付与し、`shinobi:risky` を除く他の状態 label を除去する
+- finalize needs-human: `shinobi:needs-human` を付与し、`shinobi:risky` を除く他の状態 label を除去する
 
 `shinobi:risky` は補助ラベルなので自動では除去しません。
 
@@ -461,9 +463,9 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 
 初回 run では `init` が生成した空テンプレートを読む前提にします。欠損時は fatal にはせず、空ファイル相当として扱います。
 
-Shinobi 関連ログは自由文検索ではなく、HTML comment marker と key-value 行を持つ machine-readable schema を前提にします。最低でも `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `agent_identity`, `run_id` を含めます。
+Shinobi 関連ログは自由文検索ではなく、HTML comment marker と key-value 行を持つ machine-readable schema を前提にします。最低でも `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `agent_identity`, `run_id` を含めます。`agent_identity` は `init` が生成する workspace / installation ごとの一意 ID で、複数 runner 間で共有しません。
 
-同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。stale recovery は最新の mission-state comment の値を truth 候補として参照し、古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。`agent_identity` が現在設定と一致しないコメントは ownership 不一致として resume 根拠から除外します。
+同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。stale recovery は最新の mission-state comment の値を truth 候補として参照し、古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。`agent_identity` が現在設定の一意な `agent_identity` と一致しないコメントは ownership 不一致として resume 根拠から除外します。
 
 出力:
 
@@ -496,12 +498,12 @@ Shinobi 関連ログは自由文検索ではなく、HTML comment marker と key
 MVP では interrupted run からの自動回復をサポートします。
 
 - active label が付いた Issue を見つけたら、まず lease の期限切れ有無を確認する
-- `--issue` の対象そのものに lease が有効な active mission があり、対応する PR または branch が存在し、`agent_identity` が現在設定と一致する場合は、その同一 mission を resume する
-- `--issue` が無い通常 run では、lease が有効で対応する PR または branch が存在し、`agent_identity` が現在設定と一致する active mission を 1 件だけ resume する
+- `--issue` の対象そのものに lease が有効な active mission があり、対応する PR または branch が存在し、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合は、その同一 mission を resume する
+- `--issue` が無い通常 run では、lease が有効で対応する PR または branch が存在し、`agent_identity` が現在設定の一意な `agent_identity` と一致する active mission を 1 件だけ resume する
 - 指定対象以外に lease が有効な active mission がある場合は、新規 run や別 mission への切替はせず停止する
 - GitHub 上に active label が無くても、local-only mission の branch と state が残っていて、かつ Shinobi 自身が残した retryable な `start` 失敗記録がある場合だけ cleanup 前に resume 可否を判定する
 - local-only mission の resume は、state に保存した `agent_identity`, `run_id`, `issue`, `branch`, `phase` が branch 実体と矛盾せず、`retryable_local_only: true` が残っている場合に限る
-- lease が期限切れの stale mission を resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定と一致する場合に限る
+- lease が期限切れの stale mission を resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限る
 - lease が期限切れで、PR / branch / machine-readable な Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
 - `agent_identity` が欠損または不一致の active mission は ownership 不明として `shinobi:needs-human` に寄せ、operator 判断へ委ねる
 - stale recovery を行ったときは Issue に recovery comment を残す
@@ -548,7 +550,7 @@ blocked_label: shinobi:blocked
 needs_human_label: shinobi:needs-human
 merged_label: shinobi:merged
 risky_label: shinobi:risky
-agent_identity: owner/repo#default
+agent_identity: owner/repo#default@mbp14-7f3a2c
 mission_lease_minutes: 30
 mission_heartbeat_interval_minutes: 5
 max_review_loops: 3
@@ -573,6 +575,7 @@ high_risk_paths:
 - 環境変数は token や secret のみを扱う
 - `docs/product-spec.md` の flat schema を truth として維持する
 - label 名や上限値は config で変えられる
+- `agent_identity` は `shinobi init` が workspace / installation ごとに一度だけ生成する一意値とし、複数 runner で共有しない
 
 ## エラーハンドリング方針
 

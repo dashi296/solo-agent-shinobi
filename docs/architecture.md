@@ -174,6 +174,7 @@ Use a concise and calm ninja-like tone.
 - 失敗時の `needs-human` 化
 - `--issue` 指定時に別 mission を横取りしないこと
 - `agent_identity` 不一致の stale mission を resume しないこと
+- 状態 label 正規化で `merged` と `needs-human` などが同居しないこと
 
 ### 手動確認
 
