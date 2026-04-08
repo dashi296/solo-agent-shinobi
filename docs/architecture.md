@@ -32,17 +32,32 @@ GitHub Actions
   state.json
   summary.md
   decisions.md
+  run.lock
   logs/
   cache/
 ```
 
 ### `.shinobi/state.json`
 
-- 現在の issue 番号
-- 現在の PR 番号
-- 現在の branch 名
+- 現在の `issue_number`
+- 現在の `pr_number`
+- 現在の `branch`
+- 現在の agent_identity
+- 現在の run_id
+- 現在の phase
 - review loop 回数
+- local-only mission を retry 可能とみなすかどうか
+- active mission の lease 期限
 - 最終実行結果
+- 最終エラー
+- 直近の完了または停止 mission の要約
+
+### `.shinobi/run.lock`
+
+- 同一 workspace で live run を 1 つに制限するローカル排他ファイル
+- `agent_identity`, `run_id`, `pid`, `started_at`, `heartbeat_at` を保持する
+- `heartbeat_at + mission_lease_minutes` を過ぎた lock は stale とみなし、次の run が recovery 開始前に解放または上書きできる
+- stale でない live mission への二重 attach を防ぐ
 
 ### `.shinobi/summary.md`
 
@@ -165,6 +180,9 @@ Use a concise and calm ninja-like tone.
 - Issue から PR 作成までのフロー
 - review loop の遷移
 - 失敗時の `needs-human` 化
+- `--issue` 指定時に別 mission を横取りしないこと
+- `agent_identity` 不一致の stale mission を resume しないこと
+- 状態 label 正規化で `merged` と `needs-human` などが同居しないこと
 
 ### 手動確認
 

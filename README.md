@@ -72,13 +72,15 @@ shinobi init
 shinobi status
 shinobi run
 shinobi run --issue 123
-shinobi watch
 ```
+
+`watch` や phase 分離コマンドは将来候補です。MVP の公開 CLI には含めません。
 
 ## ドキュメント構成
 
 - [docs/product-spec.md](./docs/product-spec.md): プロダクト仕様、ワークフロー、状態遷移、CLI と設定の設計
 - [docs/architecture.md](./docs/architecture.md): 内部アーキテクチャ、モジュール責務、ローカル state、テスト方針
+- [docs/mvp-design.md](./docs/mvp-design.md): MVP 実装に落とし込むための具体設計
 - [CLAUDE.md](./CLAUDE.md): このリポジトリで作業する agent 向けの行動規約
 
 ## 現在の状態
