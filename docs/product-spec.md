@@ -107,6 +107,7 @@ shinobi watch
 - 初期 config を作成する
 - workspace / installation ごとに一意な `agent_identity` を生成して config に書き込む
 - `.shinobi/summary.md` と `.shinobi/decisions.md` の空テンプレートを作成する
+- `.shinobi/run.lock` を初期化可能な状態にする
 - GitHub ラベルの推奨セットを案内する
 
 ### `shinobi run`
@@ -120,7 +121,7 @@ shinobi watch
 - review loop
 - merge 判定
 
-`--issue <id>` を指定した場合は、その Issue を最優先で扱います。対象 Issue 自身の active mission は resume してよいですが、別 Issue の active mission や、Shinobi 自身が retryable と記録した local-only mission が残っている場合は横取りせず停止します。
+`--issue <id>` を指定した場合は、その Issue を最優先で扱います。対象 Issue 自身の mission でも、lease が有効な live mission には別プロセスから attach しません。`.shinobi/run.lock` の owner でない run は停止します。別 Issue の active mission や、Shinobi 自身が retryable と記録した local-only mission が残っている場合も横取りせず停止します。
 
 ### `shinobi status`
 
@@ -211,13 +212,15 @@ high-risk path は context で候補抽出し、execute 完了前に publish 可
 MVP では interrupted run からの回復を手動 cleanup 前提にしません。
 
 - `shinobi:working` または `shinobi:reviewing` が残っている場合、tool は lease と PR / branch の生存確認で stale 判定する
+- 同一 workspace の同時実行は `.shinobi/run.lock` で防ぎ、lock owner でない run は同じ `agent_identity` の mission でも resume しない
 - GitHub 上に active label が無くても、`start` 未完了の local-only mission が branch と state に残り、かつ Shinobi 自身が retryable と記録した場合に限って resume 可否を先に判定する
 - local-only mission を resume してよいのは、state に保存した `agent_identity`, `run_id`, `issue`, `branch`, `phase` が branch 実体と整合し、かつその `agent_identity` が現在設定の一意な `agent_identity` と一致し、`retryable_local_only: true` が残っている場合に限る
 - lease は execute 中に `mission_heartbeat_interval_minutes` ごとに定期更新し、加えて phase 遷移、retry、CI polling のたびに heartbeat 更新する
-- `--issue <id>` 指定時は、その Issue 自身の active mission だけ resume 対象にする
+- `--issue <id>` 指定時は、その Issue 自身の stale mission だけを resume 対象にする
 - `--issue <id>` の対象外に active mission や retryable な local-only mission がある場合は、別 mission の横取りを避けるため停止する
-- 通常 run では stale でない active mission が 1 件だけあり、その mission の `agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限って、その same mission を resume する
+- 通常 run では stale でない active mission は live mission として扱い、resume ではなく停止要因にする
 - stale な mission を自動 resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、現在設定の一意な `agent_identity` と一致する場合に限る。publish 前の mission では `pr: null` を許容するが、その場合は branch 実体と pre-publish phase が整合している必要がある
+- つまり interrupted run recovery は stale recovery を指し、lease が有効な live mission に新しい run が合流することは許可しない
 - stale で、かつ上記の再開情報を復元できなければ、PR / branch が残っていても active label を外して `shinobi:needs-human` に遷移する
 - `agent_identity` が欠損または不一致の active mission は自分の mission とみなさず、自動 resume も自動 cleanup も行わない。GitHub 上の label / comment も変更せず、その run を停止して operator action を要求する
 - recovery や cleanup を行った場合は Issue にコメントを残す

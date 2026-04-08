@@ -32,6 +32,7 @@ GitHub Actions
   state.json
   summary.md
   decisions.md
+  run.lock
   logs/
   cache/
 ```
@@ -50,6 +51,12 @@ GitHub Actions
 - 最終実行結果
 - 最終エラー
 - 直近の完了または停止 mission の要約
+
+### `.shinobi/run.lock`
+
+- 同一 workspace で live run を 1 つに制限するローカル排他ファイル
+- `agent_identity`, `run_id`, `pid`, `started_at`, `heartbeat_at` を保持する
+- stale でない live mission への二重 attach を防ぐ
 
 ### `.shinobi/summary.md`
 
