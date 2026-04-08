@@ -91,6 +91,18 @@ class StateStore:
         if state is None:
             state = State(agent_identity=config.agent_identity)
             self.save_state(state)
+        elif not state.agent_identity and config.agent_identity:
+            state.agent_identity = config.agent_identity
+            self.save_state(state)
+
+        if not config.agent_identity:
+            config.agent_identity = state.agent_identity or default_config(
+                self.paths.root
+            ).agent_identity
+            save_config(self.paths.config_path, config)
+            if not state.agent_identity:
+                state.agent_identity = config.agent_identity
+                self.save_state(state)
 
         if not self.paths.summary_path.exists():
             self.paths.summary_path.write_text(SUMMARY_TEMPLATE, encoding="utf-8")
@@ -122,4 +134,4 @@ class StateStore:
         )
 
     def has_state(self) -> bool:
-        return self.paths.config_path.exists() and self.paths.state_path.exists()
+        return self.paths.config_path.exists() or self.paths.state_path.exists()
