@@ -1,0 +1,188 @@
+# Architecture
+
+## 目的
+
+この文書は、`solo-agent-shinobi` の内部構造と実装責務を定義します。
+
+`README.md` は概要、`docs/product-spec.md` は外部仕様、ここでは内部設計を扱います。
+
+## システム概要
+
+```text
+GitHub Issues / PRs
+  └─ source of truth
+
+solo-agent-shinobi
+  ├─ dispatcher   # 次の Issue を選ぶ
+  ├─ worker       # 実装と修正
+  ├─ reviewer     # PR / CI / diff を確認
+  ├─ merger       # マージ条件を判定
+  └─ state store  # ローカル最小 state
+
+GitHub Actions
+  └─ lint / typecheck / test / build
+```
+
+## ローカル state
+
+使用予定のローカル領域:
+
+```text
+.shinobi/
+  state.json
+  summary.md
+  decisions.md
+  logs/
+  cache/
+```
+
+### `.shinobi/state.json`
+
+- 現在の issue 番号
+- 現在の PR 番号
+- 現在の branch 名
+- review loop 回数
+- 最終実行結果
+
+### `.shinobi/summary.md`
+
+- プロジェクト全体の短い圧縮サマリ
+- 最近の重要な設計判断
+- 次回以降の実行に必要な最低限の前提
+
+### `.shinobi/decisions.md`
+
+- 継続的に参照すべき設計判断
+- やってはいけないこと
+- 合意済みの実装方針
+
+長大な思考ログを保存する設計にはしません。
+
+## 推奨モジュール構成
+
+```text
+src/shinobi/
+  cli.py
+  config.py
+  models.py
+  github_client.py
+  issue_selector.py
+  context_builder.py
+  executor.py
+  reviewer.py
+  merger.py
+  state_store.py
+```
+
+### 役割
+
+- `cli.py`: コマンド入口
+- `config.py`: 設定読み込み
+- `models.py`: ドメインモデル
+- `github_client.py`: GitHub API 操作
+- `issue_selector.py`: 次 Issue 選択
+- `context_builder.py`: 最小コンテキスト生成
+- `executor.py`: 実装フェーズ
+- `reviewer.py`: review / retry 判定
+- `merger.py`: マージ可否判定
+- `state_store.py`: ローカル state 管理
+
+## 実装優先順位
+
+### Phase 1: Foundations
+
+- config
+- CLI
+- GitHub client
+- state store
+- domain models
+
+### Phase 2: Mission lifecycle
+
+- issue selection
+- start working
+- branch creation
+- PR creation
+
+### Phase 3: Review loop
+
+- CI status retrieval
+- diff review
+- retry / refactor loop
+- stop conditions
+
+### Phase 4: Merge control
+
+- auto-merge eligibility
+- risky issue detection
+- issue close flow
+
+### Phase 5: Ergonomics
+
+- watch mode
+- slash commands
+- metrics
+- better reporting
+
+基盤を飛ばして複雑な機能に進まないことを前提にします。
+
+## Prompt / Agent 設計原則
+
+将来 `solo-agent-shinobi` が AI agent を呼び出す際の基本方針:
+
+- 対象 Issue に集中させる
+- 読むファイルを限定する
+- スコープ拡大を防ぐ
+- 結果を短く要約させる
+- follow-up issue を使わせる
+- 不明点がある場合は保守的に振る舞わせる
+
+基準プロンプト:
+
+```text
+You are Shinobi.
+You execute one mission at a time.
+Read only what you need.
+Prefer small safe changes.
+If scope grows, split it.
+If risk rises, stop and report.
+```
+
+## テスト方針
+
+### 単体テスト
+
+- 設定読み込み
+- ラベル遷移
+- issue 選択ロジック
+- 停止条件判定
+- 自動マージ可否判定
+
+### 結合テスト
+
+- Issue から PR 作成までのフロー
+- review loop の遷移
+- 失敗時の `needs-human` 化
+
+### 手動確認
+
+- `shinobi run --issue <id>` の基本動作
+- state の更新
+- コメント / ラベル操作の整合性
+
+## 依存コンポーネント候補
+
+- Python 3.11+
+- Git
+- GitHub CLI (`gh`) または GitHub API client
+- GitHub Actions
+- AI coding agent 実行環境
+
+候補ライブラリ:
+
+- `typer` または `click`
+- `pydantic`
+- `PyGithub` または `httpx`
+- `GitPython` または subprocess
+- `rich`
+- `PyYAML`
