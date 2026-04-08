@@ -123,6 +123,8 @@ shinobi watch
 
 `--issue <id>` を指定した場合は、その Issue を最優先で扱います。resume を許可するのは、その Issue 自身の stale mission で、machine-readable metadata と local state から ownership と phase を復元できる場合に限ります。lease が有効な live mission には別プロセスから attach しません。`.shinobi/run.lock` の owner でない run は停止します。別 Issue の active mission や、Shinobi 自身が retryable と記録した local-only mission が残っている場合も横取りせず停止します。
 
+実装順序としては、run 開始時にまず `.shinobi/run.lock` を確認し、stale でない lock を保持していない run は GitHub の active mission に対する recovery や label cleanup を行いません。`start` では lock 取得後に branch 作成と state 更新へ進みます。
+
 ### `shinobi status`
 
 現在の state と対象 Issue / PR の状況を表示します。

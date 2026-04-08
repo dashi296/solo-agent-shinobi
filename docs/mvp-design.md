@@ -134,9 +134,11 @@ run
 
 処理:
 
-- run 開始時に GitHub の Issue / PR / label 状態と `.shinobi/state.json` を reconciliation する
+- run 開始時は GitHub の recovery 判定や state 修復より前に `.shinobi/run.lock` を確認する
 - `.shinobi/run.lock` に他 owner の live run が見つかった場合は、同一 workspace で別 run が進行中とみなして停止する
-- `.shinobi/run.lock` は `heartbeat_at + mission_lease_minutes` を超えたら stale lock とみなし、次の run が recovery 前に解放または上書きできる
+- `.shinobi/run.lock` は `heartbeat_at + mission_lease_minutes` を超えたら stale lock とみなし、次の run が reconciliation や recovery に入る前に解放または上書きできる
+- stale でない lock を保持していない run は GitHub の label cleanup や `needs-human` 付与を行わない
+- lock を確認した後で、GitHub の Issue / PR / label 状態と `.shinobi/state.json` を reconciliation する
 - `--issue` がある場合は、その Issue を最優先の mission candidate に固定する
 - `--issue` の対象に GitHub 上の active mission または local-only mission が残っていれば、その mission だけ resume 可否を判定する
 - `--issue` の対象以外に lease が生きている active mission または retryable な local-only mission が見つかった場合は、別 mission への横滑りを避けるため停止する
@@ -160,8 +162,8 @@ run
 処理:
 
 - 実行可能 label を確認する
-- `feature/issue-<id>-<slug>` branch を作る
 - `.shinobi/run.lock` を取得し、`agent_identity`, `run_id`, `pid`, `started_at`, `heartbeat_at` を記録する
+- lock owner であることを確認してから `feature/issue-<id>-<slug>` branch を作る
 - provisional な `.shinobi/state.json` を更新する
 - `shinobi:working` を付与する
 - `shinobi:ready` を除去する
@@ -170,7 +172,7 @@ run
 
 fatal 時の補償動作:
 
-- branch 作成または state 更新後に GitHub 更新へ失敗した場合は、その mission を `start` 未完了の local-only mission として retryable に残し、state に `retryable_local_only: true` と失敗理由を記録する
+- lock 取得後に branch 作成または state 更新が失敗した場合は、その mission を `start` 未完了の local-only mission として retryable に残し、state に `retryable_local_only: true` と失敗理由を記録する
 - local-only mission は次回 run の reconciliation で branch / issue 番号 / phase を照合し、Shinobi 自身が残した retryable 記録がある場合だけ resume または cleanup 判定する
 - GitHub の active label 更新後に fatal が起きた場合は、active label を外して `shinobi:needs-human` を付け、fatal 理由を Issue に投稿する
 - fatal / 完了 / 明示停止のいずれでも、現在 run が owner なら `.shinobi/run.lock` を解放する
@@ -283,8 +285,6 @@ ready -> working -> reviewing -> merged
        └-> needs-human
 blocked -> ready
 needs-human -> ready
-                     └-> blocked
-                     └-> needs-human
 ```
 
 補助ルール:
