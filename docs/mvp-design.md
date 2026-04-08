@@ -495,7 +495,7 @@ MVP では interrupted run からの自動回復をサポートします。
 - 指定対象以外に lease が有効な active mission がある場合は、新規 run や別 mission への切替はせず停止する
 - GitHub 上に active label が無くても、local-only mission の branch と state が残っていて、かつ Shinobi 自身が残した retryable な `start` 失敗記録がある場合だけ cleanup 前に resume 可否を判定する
 - local-only mission の resume は、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と矛盾せず、`retryable_local_only: true` が残っている場合に限る
-- lease が期限切れでも、対応する PR または branch から state を再構築できる場合は、その mission を resume する
+- lease が期限切れの stale mission を resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元できる場合に限る
 - lease が期限切れで、PR / branch / machine-readable な Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
 - stale recovery を行ったときは Issue に recovery comment を残す
 - lease は execute 中の定期更新と、phase 遷移時、retry 時、CI polling 中の heartbeat 更新を前提にする
