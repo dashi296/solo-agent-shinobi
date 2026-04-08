@@ -5,6 +5,7 @@ import socket
 import subprocess
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .models import Config
 
@@ -36,8 +37,9 @@ def discover_repo_slug(cwd: Path) -> str:
         return "unknown/unknown"
     if remote.startswith("git@github.com:"):
         return remote.removeprefix("git@github.com:").removesuffix(".git")
-    if remote.startswith("https://github.com/"):
-        return remote.removeprefix("https://github.com/").removesuffix(".git")
+    parsed = urlparse(remote)
+    if parsed.scheme and parsed.path and parsed.netloc in {"github.com", "git@github.com"}:
+        return parsed.path.lstrip("/").removesuffix(".git")
     return remote.removesuffix(".git")
 
 

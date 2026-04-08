@@ -8,11 +8,12 @@ import unittest
 import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from shinobi import cli
+from shinobi.config import discover_repo_slug
 from shinobi.state_store import StateStore
 
 
@@ -105,6 +106,47 @@ class CliTest(unittest.TestCase):
             self.assertNotEqual(original_state.agent_identity, repaired_config["agent_identity"])
             self.assertEqual(repaired_state.agent_identity, repaired_config["agent_identity"])
 
+    def test_init_repairs_invalid_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config = json.loads(store.paths.config_path.read_text(encoding="utf-8"))
+                    store.paths.state_path.write_text("{broken", encoding="utf-8")
+
+                    with redirect_stdout(io.StringIO()):
+                        exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            repaired_state = store.load_state()
+            self.assertEqual(repaired_state.agent_identity, config["agent_identity"])
+            self.assertEqual(repaired_state.phase, "idle")
+
+    def test_init_repairs_invalid_config_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    original_config = json.loads(store.paths.config_path.read_text(encoding="utf-8"))
+                    store.paths.config_path.write_text("{broken", encoding="utf-8")
+
+                    with redirect_stdout(io.StringIO()):
+                        exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            repaired_config = json.loads(store.paths.config_path.read_text(encoding="utf-8"))
+            repaired_state = store.load_state()
+            self.assertNotEqual(repaired_config["agent_identity"], original_config["agent_identity"])
+            self.assertEqual(repaired_state.agent_identity, repaired_config["agent_identity"])
+
     def test_status_warns_when_state_file_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -161,6 +203,12 @@ class CliTest(unittest.TestCase):
 
             self.assertTrue(any(name.startswith("shinobi/") for name in names))
             self.assertTrue(any(name.endswith(".dist-info/entry_points.txt") for name in names))
+
+    def test_discover_repo_slug_normalizes_ssh_url(self) -> None:
+        with patch("subprocess.run", return_value=Mock(stdout="ssh://git@github.com/owner/repo.git\n")):
+            repo = discover_repo_slug(Path("."))
+
+        self.assertEqual(repo, "owner/repo")
 
 
 if __name__ == "__main__":

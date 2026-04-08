@@ -73,14 +73,20 @@ class StateStore:
         self.paths.cache_dir.mkdir(exist_ok=True)
 
         if self.paths.config_path.exists():
-            config = load_config(self.paths.config_path)
+            config, _ = self.try_load_config()
         else:
+            config = None
+
+        if config is None:
             config = default_config(self.paths.root)
             save_config(self.paths.config_path, config)
 
         if self.paths.state_path.exists():
-            state = self.load_state()
+            state, _ = self.try_load_state()
         else:
+            state = None
+
+        if state is None:
             state = State(agent_identity=config.agent_identity)
             self.save_state(state)
 
@@ -99,6 +105,12 @@ class StateStore:
 
     def load_state(self) -> State:
         return State.from_dict(json.loads(self.paths.state_path.read_text(encoding="utf-8")))
+
+    def try_load_config(self) -> Tuple[Config | None, str | None]:
+        try:
+            return load_config(self.paths.config_path), None
+        except (OSError, JSONDecodeError, TypeError, ValueError) as error:
+            return None, str(error)
 
     def try_load_state(self) -> Tuple[State | None, str | None]:
         try:
