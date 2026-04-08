@@ -128,9 +128,11 @@ run
 
 処理:
 
+- run 開始時に GitHub の Issue / PR / label 状態と `.shinobi/state.json` を reconciliation する
+- stale な active mission が state にだけ残っている場合は、GitHub の状態を優先して state を修復する
 - `--issue` があればその Issue を対象にする
 - なければ `shinobi:ready` を優先度順で 1 件選ぶ
-- すでに他の active mission が state に残っていれば停止する
+- reconciliation 後も GitHub 上で別の active mission が確認できる場合だけ停止する
 
 出力:
 
@@ -142,6 +144,7 @@ run
 
 - 実行可能 label を確認する
 - `shinobi:working` を付与する
+- `shinobi:ready` を除去する
 - 開始コメントを投稿する
 - `feature/issue-<id>-<slug>` branch を作る
 - `.shinobi/state.json` を更新する
@@ -186,6 +189,7 @@ run
 
 - PR を作成または更新する
 - `shinobi:reviewing` へ遷移する
+- `shinobi:working` と `shinobi:ready` を除去する
 - diff と CI を review phase から参照できる状態にする
 
 ### Phase 6: review
@@ -229,6 +233,7 @@ run
 
 - Issue に完了または停止コメントを投稿する
 - label を `shinobi:merged` / `shinobi:blocked` / `shinobi:needs-human` に更新する
+- `shinobi:ready` `shinobi:working` `shinobi:reviewing` を必ず除去する
 - issue を close するか、継続可能な状態に残す
 - `.shinobi/state.json` を完了状態へ更新する
 
@@ -280,6 +285,19 @@ ready -> working -> reviewing -> merged
 - 直近の完了または停止結果を `last_completed_mission` に保持する
 - state は再開補助であり truth ではない
 - GitHub 側と矛盾したら GitHub を優先する
+- run の先頭で reconciliation してから active mission 判定を行う
+
+### ラベル遷移ルール
+
+各 phase で更新する label は次の通りです。
+
+- start: `shinobi:working` を付与し、`shinobi:ready` を除去する
+- publish: `shinobi:reviewing` を付与し、`shinobi:ready` と `shinobi:working` を除去する
+- finalize merged: `shinobi:merged` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
+- finalize blocked: `shinobi:blocked` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
+- finalize needs-human: `shinobi:needs-human` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
+
+`shinobi:risky` は補助ラベルなので自動では除去しません。
 
 ## ドメインモデル
 

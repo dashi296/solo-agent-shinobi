@@ -211,6 +211,14 @@ or
   -> shinobi:needs-human
 ```
 
+補助ルール:
+
+- `shinobi:ready` `shinobi:working` `shinobi:reviewing` は相互排他的に扱う
+- `shinobi:working` を付けるときは `shinobi:ready` を外す
+- `shinobi:reviewing` を付けるときは `shinobi:ready` と `shinobi:working` を外す
+- 終端ラベルを付けるときは `shinobi:ready` `shinobi:working` `shinobi:reviewing` を外す
+- `shinobi:risky` は補助ラベルなので自動では外さない
+
 ## コメントと PR テンプレート例
 
 開始時:
