@@ -195,7 +195,8 @@ fatal 時の補償動作:
 
 - 対象ファイルだけ編集する
 - high-risk path 候補に実際に触れる必要があるかを、publish 前に最終判定する
-- publish 前に high-risk path が確定した場合は PR を作らず `needs-human` または `blocked` に遷移する
+- publish 前に high-risk path が確定した場合でも、human handoff に必要な差分があるなら branch を push し、原則 draft PR を作成または更新してから `needs-human` または `blocked` に遷移する
+- publish 前に差分が無いか共有価値が無い場合だけ、PR を作らず停止する
 - execute 中は `mission_heartbeat_interval_minutes` ごとに定期 heartbeat を更新する
 - 長時間処理に入る前と各 retry 後にも即時 heartbeat を更新する
 - lint / typecheck / test を実行する
@@ -318,7 +319,7 @@ ready -> working -> reviewing -> merged
 - 直近の完了または停止結果を `last_completed_mission` に保持する
 - active mission には `run_id` を保持し、local-only mission と stale recovery の同一性確認に使う
 - state は再開補助であり truth ではないが、`start` 未完了の local-only mission を回復するための一次手掛かりとして扱う
-- local-only mission の resume は state 単独では許可せず、Shinobi 自身が残した retryable 記録で裏付ける
+- local-only mission の resume は state 単独では許可せず、`retryable_local_only` と Shinobi 自身が残した retryable 記録で裏付ける
 - GitHub 側と矛盾したら GitHub を優先する
 - run の先頭で reconciliation してから active mission 判定を行う
 - active mission には lease を持たせ、期限切れなら stale recovery 対象にする
@@ -507,7 +508,7 @@ MVP では次の 2 種類を分けて扱います。
 - `shinobi:risky`: Issue-level の manual merge 指示。publish までは進めるが auto-merge はしない
 - high-risk path: execution risk。対象ファイルが `migrations/` `infra/` `auth/` `billing/` などに触れる必要があるなら publish 前でも停止しうる
 
-high-risk path の一次判定は context で候補抽出し、最終判定は execute 完了前に行います。publish 前に確定した場合は PR 未作成のまま `needs-human` か `blocked` に遷移します。publish 後の review で追加検知した場合は PR を残したまま `needs-human` に遷移します。
+high-risk path の一次判定は context で候補抽出し、最終判定は execute 完了前に行います。publish 前に確定した場合でも、human handoff に必要な差分があるなら branch を push し、原則 draft PR を作成または更新したうえで `needs-human` か `blocked` に遷移します。差分が無いか共有価値が無い場合だけ PR 未作成で停止します。publish 後の review で追加検知した場合は PR を残したまま `needs-human` に遷移します。
 
 ### high-risk path 例
 

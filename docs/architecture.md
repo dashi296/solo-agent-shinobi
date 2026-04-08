@@ -44,6 +44,7 @@ GitHub Actions
 - 現在の run_id
 - 現在の phase
 - review loop 回数
+- local-only mission を retry 可能とみなすかどうか
 - active mission の lease 期限
 - 最終実行結果
 - 最終エラー

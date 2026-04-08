@@ -105,6 +105,7 @@ shinobi watch
 
 - `.shinobi/` を作成する
 - 初期 config を作成する
+- `.shinobi/summary.md` と `.shinobi/decisions.md` の空テンプレートを作成する
 - GitHub ラベルの推奨セットを案内する
 
 ### `shinobi run`
@@ -201,7 +202,7 @@ max_token_budget: 40000
 
 迷ったら自動マージしません。
 
-high-risk path は context で候補抽出し、execute 完了前に publish 可否を最終判定します。publish 前に確定した場合は PR を作らず停止し、publish 後に review で追加検知した場合だけ PR を残したまま `shinobi:needs-human` へ遷移します。
+high-risk path は context で候補抽出し、execute 完了前に publish 可否を最終判定します。publish 前に確定した場合でも、human handoff に必要な差分があるなら branch を push し、原則 draft PR を作成または更新してから `shinobi:needs-human` か `shinobi:blocked` へ遷移します。差分が無いか共有価値が無い場合だけ PR を作らず停止します。publish 後に review で追加検知した場合は PR を残したまま `shinobi:needs-human` へ遷移します。
 
 ## Interrupted Run Recovery
 
