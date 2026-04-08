@@ -201,12 +201,15 @@ max_token_budget: 40000
 
 迷ったら自動マージしません。
 
+high-risk path は context で候補抽出し、execute 完了前に publish 可否を最終判定します。publish 前に確定した場合は PR を作らず停止し、publish 後に review で追加検知した場合だけ PR を残したまま `shinobi:needs-human` へ遷移します。
+
 ## Interrupted Run Recovery
 
 MVP では interrupted run からの回復を手動 cleanup 前提にしません。
 
 - `shinobi:working` または `shinobi:reviewing` が残っている場合、tool は lease と PR / branch の生存確認で stale 判定する
 - GitHub 上に active label が無くても、`start` 未完了の local-only mission が branch と state に残っていれば resume 可否を先に判定する
+- local-only mission を resume してよいのは、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と整合する場合に限る
 - lease は execute 中に `mission_heartbeat_interval_minutes` ごとに定期更新し、加えて phase 遷移、retry、CI polling のたびに heartbeat 更新する
 - `--issue <id>` 指定時は、その Issue 自身の active mission だけ resume 対象にする
 - `--issue <id>` の対象外に active mission や retryable な local-only mission がある場合は、別 mission の横取りを避けるため停止する

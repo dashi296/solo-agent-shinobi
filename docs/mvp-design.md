@@ -194,6 +194,8 @@ fatal 時の補償動作:
 処理:
 
 - 対象ファイルだけ編集する
+- high-risk path 候補に実際に触れる必要があるかを、publish 前に最終判定する
+- publish 前に high-risk path が確定した場合は PR を作らず `needs-human` または `blocked` に遷移する
 - execute 中は `mission_heartbeat_interval_minutes` ごとに定期 heartbeat を更新する
 - 長時間処理に入る前と各 retry 後にも即時 heartbeat を更新する
 - lint / typecheck / test を実行する
@@ -219,10 +221,10 @@ fatal 時の補償動作:
 処理:
 
 - diff 規模を確認する
+- publish 後の diff を再確認し、execute 時点で見逃した high-risk path や scope 逸脱があれば `needs-human` に遷移する
 - CI 待機の前後と polling 中に lease heartbeat を更新する
 - CI 結果を確認する
 - review loop 上限内なら再試行する
-- high-risk path を検知したら `needs-human` に遷移する
 
 主な判定軸:
 
@@ -287,6 +289,7 @@ ready -> working -> reviewing -> merged
   "active_issue_number": 123,
   "active_pr_number": 456,
   "active_branch": "feature/issue-123-login-form",
+  "run_id": "20260409T100000-issue-123",
   "phase": "review",
   "review_loop_count": 1,
   "lease_expires_at": "2026-04-09T10:30:00+09:00",
@@ -308,6 +311,7 @@ ready -> working -> reviewing -> merged
 
 - active mission は 0 か 1 のみ
 - 直近の完了または停止結果を `last_completed_mission` に保持する
+- active mission には `run_id` を保持し、local-only mission と stale recovery の同一性確認に使う
 - state は再開補助であり truth ではないが、`start` 未完了の local-only mission を回復するための一次手掛かりとして扱う
 - GitHub 側と矛盾したら GitHub を優先する
 - run の先頭で reconciliation してから active mission 判定を行う
@@ -480,6 +484,7 @@ MVP では interrupted run からの自動回復をサポートします。
 - `--issue` が無い通常 run では、lease が有効で対応する PR または branch が存在する active mission を 1 件だけ resume する
 - 指定対象以外に lease が有効な active mission がある場合は、新規 run や別 mission への切替はせず停止する
 - GitHub 上に active label が無くても、local-only mission の branch と state が残っている場合は cleanup 前に resume 可否を判定する
+- local-only mission の resume は、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と矛盾しない場合に限る
 - lease が期限切れでも、対応する PR または branch から state を再構築できる場合は、その mission を resume する
 - lease が期限切れで、PR / branch / machine-readable な Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
 - stale recovery を行ったときは Issue に recovery comment を残す
@@ -493,7 +498,7 @@ MVP では次の 2 種類を分けて扱います。
 - `shinobi:risky`: Issue-level の manual merge 指示。publish までは進めるが auto-merge はしない
 - high-risk path: execution risk。対象ファイルが `migrations/` `infra/` `auth/` `billing/` などに触れる必要があるなら publish 前でも停止しうる
 
-high-risk path を検知した場合は、PR 未作成ならそのまま `needs-human` か `blocked` に遷移します。PR 作成後に検知した場合は PR を残したまま `needs-human` に遷移します。
+high-risk path の一次判定は context で候補抽出し、最終判定は execute 完了前に行います。publish 前に確定した場合は PR 未作成のまま `needs-human` か `blocked` に遷移します。publish 後の review で追加検知した場合は PR を残したまま `needs-human` に遷移します。
 
 ### high-risk path 例
 

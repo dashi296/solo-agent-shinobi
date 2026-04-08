@@ -41,6 +41,7 @@ GitHub Actions
 - 現在の issue 番号
 - 現在の PR 番号
 - 現在の branch 名
+- 現在の run_id
 - 現在の phase
 - review loop 回数
 - active mission の lease 期限
