@@ -147,10 +147,10 @@ run
 - local-only mission でなく GitHub 上にも対応する active 状態が無い場合は、GitHub の状態を優先して state を修復する
 - GitHub 側に `shinobi:working` / `shinobi:reviewing` が残っている場合は lease と PR / branch の生存確認で stale 判定する
 - stale でない active mission は、同一 `agent_identity` であっても lease 有効中なら自動 resume しない。live mission は `.shinobi/run.lock` の owner だけが継続できるものとし、owner でない run は停止する
-- lease が切れた stale mission は、まず select phase 内で stale lock takeover を取得した run だけが recovery / cleanup を行える
-- stale lock takeover 後、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限って resume する
-- stale lock takeover 後でも、復元情報が不足するか整合しない場合は、branch や PR が残っていても自動 resume せず、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
-- `agent_identity` が欠損または不一致の active mission は ownership 不明として自動 resume は行わない。lease が有効な live mission なら GitHub 上の label や comment を変更せず停止する。lease が切れた stale mission なら、stale lock takeover を取得した run に限って `shinobi:needs-human` への cleanup と ownership 不一致コメントの投稿だけを許可する
+- lease が切れた stale mission は、他 owner の live lock が存在しないことを確認できた run が recovery / cleanup を行える。stale lock が残っている場合は、その run がまず takeover してから続行する
+- stale mission を扱う run は、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue_number`, `branch`, `phase`, `pr_number` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限って resume する
+- stale mission で復元情報が不足するか整合しない場合は、branch や PR が残っていても自動 resume せず、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
+- `agent_identity` が欠損または不一致の active mission は ownership 不明として自動 resume は行わない。lease が有効な live mission なら GitHub 上の label や comment を変更せず停止する。lease が切れた stale mission なら、他 owner の live lock が存在しないことを確認できた run に限って `shinobi:needs-human` への cleanup と ownership 不一致コメントの投稿だけを許可する
 - `--issue` がなければ `shinobi:ready` を優先度順で 1 件選ぶ
 - reconciliation 後も lease が生きている別の active mission が GitHub 上に確認できる場合だけ停止する
 
@@ -304,9 +304,9 @@ needs-human -> ready
 
 ```json
 {
-  "active_issue_number": 123,
-  "active_pr_number": 456,
-  "active_branch": "feature/issue-123-login-form",
+  "issue_number": 123,
+  "pr_number": 456,
+  "branch": "feature/issue-123-login-form",
   "agent_identity": "owner/repo#default@mbp14-7f3a2c",
   "run_id": "20260409T100000-issue-123",
   "phase": "review",
@@ -516,12 +516,12 @@ MVP では interrupted run からの自動回復をサポートします。
 - `--issue` が無い通常 run でも、lease が有効な active mission は live mission とみなし、新規 run からは resume しない
 - 指定対象以外に lease が有効な active mission がある場合は、新規 run や別 mission への切替はせず停止する
 - GitHub 上に active label が無くても、local-only mission の branch と state が残っていて、かつ Shinobi 自身が残した retryable な `start` 失敗記録がある場合だけ cleanup 前に resume 可否を判定する
-- local-only mission の resume は、state に保存した `agent_identity`, `run_id`, `issue`, `branch`, `phase` が branch 実体と矛盾せず、`retryable_local_only: true` が残っている場合に限る
-- lease が期限切れの stale mission は、select phase で stale lock takeover を取得した run だけが recovery / cleanup を続行できる
-- stale mission を resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限る。publish 前の stale mission では `pr: null` を許容するが、その場合も branch 実体と pre-publish phase の整合が必須
+- local-only mission の resume は、state に保存した `agent_identity`, `run_id`, `issue_number`, `branch`, `phase` が branch 実体と矛盾せず、`retryable_local_only: true` が残っている場合に限る
+- lease が期限切れの stale mission は、他 owner の live lock が存在しないことを確認できた run だけが recovery / cleanup を続行できる。stale lock が残っている場合は、その run がまず takeover してから続行する
+- stale mission を resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue_number`, `branch`, `phase`, `pr_number` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限る。publish 前の stale mission では `pr: null` を許容するが、その場合も branch 実体と pre-publish phase の整合が必須
 - つまり resume は stale recovery 専用であり、lease が有効な live mission に別プロセスが合流することは許可しない
 - lease が期限切れで、PR / branch / machine-readable な Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
-- `agent_identity` が欠損または不一致の active mission は ownership 不明として扱い、自動 resume は行わない。lease が有効な live mission なら GitHub 上の label / comment を変更せずに停止して operator 判断へ委ねる。lease が期限切れの stale mission なら、stale lock takeover を取得した run に限って `shinobi:needs-human` への cleanup と ownership 不一致コメントを許可する
+- `agent_identity` が欠損または不一致の active mission は ownership 不明として扱い、自動 resume は行わない。lease が有効な live mission なら GitHub 上の label / comment を変更せずに停止して operator 判断へ委ねる。lease が期限切れの stale mission なら、他 owner の live lock が存在しないことを確認できた run に限って `shinobi:needs-human` への cleanup と ownership 不一致コメントを許可する
 - stale recovery を行ったときは Issue に recovery comment を残す
 - lease は execute 中の定期更新と、phase 遷移時、retry 時、CI polling 中の heartbeat 更新を前提にする
 - そのため lease 期限切れは interruption の強いシグナルとして扱う

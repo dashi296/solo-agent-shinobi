@@ -39,9 +39,9 @@ GitHub Actions
 
 ### `.shinobi/state.json`
 
-- 現在の issue 番号
-- 現在の PR 番号
-- 現在の branch 名
+- 現在の `issue_number`
+- 現在の `pr_number`
+- 現在の `branch`
 - 現在の agent_identity
 - 現在の run_id
 - 現在の phase
