@@ -85,7 +85,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse(store.paths.decisions_path.exists())
             self.assertFalse(store.paths.lock_path.exists())
 
-    def test_init_repairs_state_agent_identity_when_config_is_recreated(self) -> None:
+    def test_init_preserves_state_agent_identity_when_config_is_recreated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
@@ -103,7 +103,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             repaired_config = json.loads(store.paths.config_path.read_text(encoding="utf-8"))
             repaired_state = store.load_state()
-            self.assertNotEqual(original_state.agent_identity, repaired_config["agent_identity"])
+            self.assertEqual(original_state.agent_identity, repaired_config["agent_identity"])
             self.assertEqual(repaired_state.agent_identity, repaired_config["agent_identity"])
 
     def test_init_repairs_invalid_state_file(self) -> None:
@@ -144,7 +144,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             repaired_config = json.loads(store.paths.config_path.read_text(encoding="utf-8"))
             repaired_state = store.load_state()
-            self.assertNotEqual(repaired_config["agent_identity"], original_config["agent_identity"])
+            self.assertEqual(repaired_config["agent_identity"], original_config["agent_identity"])
             self.assertEqual(repaired_state.agent_identity, repaired_config["agent_identity"])
 
     def test_status_warns_when_state_file_is_invalid(self) -> None:
@@ -206,6 +206,13 @@ class CliTest(unittest.TestCase):
 
     def test_discover_repo_slug_normalizes_ssh_url(self) -> None:
         with patch("subprocess.run", return_value=Mock(stdout="ssh://git@github.com/owner/repo.git\n")):
+            repo = discover_repo_slug(Path("."))
+
+        self.assertEqual(repo, "owner/repo")
+
+    def test_discover_repo_slug_strips_https_credentials(self) -> None:
+        remote = "https://x-access-token:ghp_secret@github.com/owner/repo.git\n"
+        with patch("subprocess.run", return_value=Mock(stdout=remote)):
             repo = discover_repo_slug(Path("."))
 
         self.assertEqual(repo, "owner/repo")

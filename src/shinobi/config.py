@@ -38,7 +38,7 @@ def discover_repo_slug(cwd: Path) -> str:
     if remote.startswith("git@github.com:"):
         return remote.removeprefix("git@github.com:").removesuffix(".git")
     parsed = urlparse(remote)
-    if parsed.scheme and parsed.path and parsed.netloc in {"github.com", "git@github.com"}:
+    if parsed.scheme and parsed.path and parsed.hostname == "github.com":
         return parsed.path.lstrip("/").removesuffix(".git")
     return remote.removesuffix(".git")
 

@@ -72,6 +72,11 @@ class StateStore:
         self.paths.logs_dir.mkdir(exist_ok=True)
         self.paths.cache_dir.mkdir(exist_ok=True)
 
+        if self.paths.state_path.exists():
+            state, _ = self.try_load_state()
+        else:
+            state = None
+
         if self.paths.config_path.exists():
             config, _ = self.try_load_config()
         else:
@@ -79,19 +84,12 @@ class StateStore:
 
         if config is None:
             config = default_config(self.paths.root)
+            if state is not None and state.agent_identity:
+                config.agent_identity = state.agent_identity
             save_config(self.paths.config_path, config)
-
-        if self.paths.state_path.exists():
-            state, _ = self.try_load_state()
-        else:
-            state = None
 
         if state is None:
             state = State(agent_identity=config.agent_identity)
-            self.save_state(state)
-
-        if state.agent_identity != config.agent_identity:
-            state.agent_identity = config.agent_identity
             self.save_state(state)
 
         if not self.paths.summary_path.exists():
