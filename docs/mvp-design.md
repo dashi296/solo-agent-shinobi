@@ -141,7 +141,7 @@ run
 - lock を確認した後で、GitHub の Issue / PR / label 状態と `.shinobi/state.json` を reconciliation する
 - `--issue` がある場合は、その Issue を最優先の mission candidate に固定する
 - `--issue` の対象に GitHub 上の active mission または local-only mission が残っていれば、その mission だけ resume 可否を判定する
-- `--issue` の対象以外に lease が生きている active mission または retryable な local-only mission が見つかった場合は、別 mission への横滑りを避けるため停止する
+- `--issue` の対象以外に active mission または retryable な local-only mission が見つかった場合は、それが stale であっても別 mission への横滑りや cleanup を避けるため停止する
 - `--issue` がない場合だけ、stale な active mission が state にだけ残っているかを確認する
 - local-only mission で、対応する branch が存在し、state に `retryable_local_only: true` が残り、かつ state の `agent_identity` と現在設定の一意な `agent_identity` が一致し、最後の Shinobi コメントまたは local log に branch 作成後の retryable な `start` 失敗記録がある場合だけ、その branch と state を使って同じ mission を再開する
 - local-only mission でなく GitHub 上にも対応する active 状態が無い場合は、GitHub の状態を優先して state を修復する
@@ -207,6 +207,7 @@ fatal 時の補償動作:
 - 対象ファイルだけ編集する
 - high-risk path 候補に実際に触れる必要があるかを、publish 前に最終判定する
 - publish 前に high-risk path が確定した場合でも、human handoff に必要な差分があるなら branch を push し、原則 draft PR を作成または更新してから `needs-human` または `blocked` に遷移する
+- この pre-publish stop で PR を作成または更新した場合も、machine-readable な mission-state コメントを同じ mission の comment 上で upsert し、最新の `pr`, `phase`, `lease_expires_at` を反映して recovery と整合させる
 - publish 前に差分が無いか共有価値が無い場合だけ、PR を作らず停止する
 - execute 中は `mission_heartbeat_interval_minutes` ごとに定期 heartbeat を更新する
 - 長時間処理に入る前と各 retry 後にも即時 heartbeat を更新する
@@ -478,7 +479,7 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 
 Shinobi 関連ログは自由文検索ではなく、HTML comment marker の中に固定 schema の key-value block を持つ machine-readable comment を前提にします。最低でも `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `agent_identity`, `run_id` を含めます。recovery は自由文本文ではなく marker 内 block だけを parse 対象にします。`agent_identity` は `init` が生成する workspace / installation ごとの一意 ID で、複数 runner 間で共有しません。
 
-同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。stale recovery は最新の mission-state comment の marker 内 block の値を truth 候補として参照します。`pr: null` は start から publish 前までの mission に限って許容し、その場合は branch 実体と phase 整合を追加で確認します。publish 済みのはずなのに古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。`agent_identity` が現在設定の一意な `agent_identity` と一致しないコメントは ownership 不一致として resume 根拠から除外します。
+同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。high-risk path などで publish 前に停止する場合でも、PR を作成または更新したなら同じ comment を upsert して `pr` と停止時の phase を最新化します。stale recovery は最新の mission-state comment の marker 内 block の値を truth 候補として参照します。`pr: null` は start から publish 前までの mission に限って許容し、その場合は branch 実体と phase 整合を追加で確認します。publish 済みのはずなのに古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。`agent_identity` が現在設定の一意な `agent_identity` と一致しないコメントは ownership 不一致として resume 根拠から除外します。
 
 出力:
 
@@ -515,7 +516,7 @@ MVP では interrupted run からの自動回復をサポートします。
 - `.shinobi/run.lock` は `heartbeat_at + mission_lease_minutes` を超えたら stale lock とみなし、次の run は recovery 前に current `run_id` でその lock を原子的に takeover してから解放または上書きできる
 - `--issue` の対象そのものに lease が有効な active mission があっても、自分が `.shinobi/run.lock` の owner でない限り resume しない
 - `--issue` が無い通常 run でも、lease が有効な active mission は live mission とみなし、新規 run からは resume しない
-- 指定対象以外に lease が有効な active mission がある場合は、新規 run や別 mission への切替はせず停止する
+- 指定対象以外に active mission や retryable な local-only mission がある場合は、それが stale であっても新規 run や別 mission への切替、cleanup はせず停止する
 - GitHub 上に active label が無くても、local-only mission の branch と state が残っていて、かつ Shinobi 自身が残した retryable な `start` 失敗記録がある場合だけ cleanup 前に resume 可否を判定する
 - local-only mission の resume は、state に保存した `agent_identity`, `run_id`, `issue_number`, `branch`, `phase` が branch 実体と矛盾せず、`retryable_local_only: true` が残り、branch 作成後の retryable な `start` 失敗記録で裏付けられる場合に限る
 - lease が期限切れの stale mission は、select phase で `.shinobi/run.lock` を取得済みか、残っていた stale lock を current `run_id` で takeover 済みの run だけが recovery / cleanup を続行できる
