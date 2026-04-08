@@ -141,10 +141,10 @@ run
 - local-only mission で、対応する branch が存在し、state に `retryable_local_only: true` が残り、かつ state の `agent_identity` と現在設定の一意な `agent_identity` が一致し、最後の Shinobi コメントまたは local log に retryable な `start` 失敗記録がある場合だけ、その branch と state を使って同じ mission を再開する
 - local-only mission でなく GitHub 上にも対応する active 状態が無い場合は、GitHub の状態を優先して state を修復する
 - GitHub 側に `shinobi:working` / `shinobi:reviewing` が残っている場合は lease と PR / branch の生存確認で stale 判定する
-- stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する。ただし mission-state comment の `agent_identity` が現在設定の一意な `agent_identity` と一致しない active mission は自分の mission とみなさない
+- stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する。publish 前の mission では `pr: null` を許容するが、その場合は branch と phase が整合していることを resume 条件に含める。ただし mission-state comment の `agent_identity` が現在設定の一意な `agent_identity` と一致しない active mission は自分の mission とみなさない
 - lease が切れた stale mission は、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限って resume する
 - stale で、復元情報が不足するか整合しない場合は、branch や PR が残っていても自動 resume せず、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
-- `agent_identity` が欠損または不一致の active mission は ownership 不明として自動 cleanup せず、operator 向けコメント付きで `shinobi:needs-human` に寄せる
+- `agent_identity` が欠損または不一致の active mission は ownership 不明として自動 resume も自動 cleanup も行わず、その run 自体を停止する。GitHub 上の label や comment は変更せず、operator action が必要な旨をローカル status / log に記録する
 - `--issue` がなければ `shinobi:ready` を優先度順で 1 件選ぶ
 - reconciliation 後も lease が生きている別の active mission が GitHub 上に確認できる場合だけ停止する
 
@@ -465,7 +465,7 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 
 Shinobi 関連ログは自由文検索ではなく、HTML comment marker と key-value 行を持つ machine-readable schema を前提にします。最低でも `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `agent_identity`, `run_id` を含めます。`agent_identity` は `init` が生成する workspace / installation ごとの一意 ID で、複数 runner 間で共有しません。
 
-同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。stale recovery は最新の mission-state comment の値を truth 候補として参照し、古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。`agent_identity` が現在設定の一意な `agent_identity` と一致しないコメントは ownership 不一致として resume 根拠から除外します。
+同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。stale recovery は最新の mission-state comment の値を truth 候補として参照します。`pr: null` は start から publish 前までの mission に限って許容し、その場合は branch 実体と phase 整合を追加で確認します。publish 済みのはずなのに古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。`agent_identity` が現在設定の一意な `agent_identity` と一致しないコメントは ownership 不一致として resume 根拠から除外します。
 
 出力:
 
@@ -503,9 +503,9 @@ MVP では interrupted run からの自動回復をサポートします。
 - 指定対象以外に lease が有効な active mission がある場合は、新規 run や別 mission への切替はせず停止する
 - GitHub 上に active label が無くても、local-only mission の branch と state が残っていて、かつ Shinobi 自身が残した retryable な `start` 失敗記録がある場合だけ cleanup 前に resume 可否を判定する
 - local-only mission の resume は、state に保存した `agent_identity`, `run_id`, `issue`, `branch`, `phase` が branch 実体と矛盾せず、`retryable_local_only: true` が残っている場合に限る
-- lease が期限切れの stale mission を resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限る
+- lease が期限切れの stale mission を resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`agent_identity` が現在設定の一意な `agent_identity` と一致する場合に限る。publish 前の stale mission では `pr: null` を許容するが、その場合も branch 実体と pre-publish phase の整合が必須
 - lease が期限切れで、PR / branch / machine-readable な Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
-- `agent_identity` が欠損または不一致の active mission は ownership 不明として `shinobi:needs-human` に寄せ、operator 判断へ委ねる
+- `agent_identity` が欠損または不一致の active mission は ownership 不明として扱い、GitHub 上の label / comment を変更せずに停止して operator 判断へ委ねる
 - stale recovery を行ったときは Issue に recovery comment を残す
 - lease は execute 中の定期更新と、phase 遷移時、retry 時、CI polling 中の heartbeat 更新を前提にする
 - そのため lease 期限切れは interruption の強いシグナルとして扱う
