@@ -89,6 +89,7 @@ shinobi run --issue 123
 
 - ローカル state を読む
 - GitHub 上の Issue / PR 状態を照合する
+- GitHub 照合に失敗した場合でも、ローカル state だけで直近の mission 状態を表示する
 - active mission がなければ直近の mission summary を表示する
 - 不整合があれば warning を出す
 
@@ -140,7 +141,8 @@ run
 - local-only mission でなく GitHub 上にも対応する active 状態が無い場合は、GitHub の状態を優先して state を修復する
 - GitHub 側に `shinobi:working` / `shinobi:reviewing` が残っている場合は lease と PR / branch の生存確認で stale 判定する
 - stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する
-- stale かつ再開不能なら、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
+- lease が切れた stale mission は、machine-readable な Shinobi コメントと local / PR metadata から `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元できる場合に限って resume する
+- stale で、復元情報が不足するか整合しない場合は、branch や PR が残っていても自動 resume せず、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
 - `--issue` がなければ `shinobi:ready` を優先度順で 1 件選ぶ
 - reconciliation 後も lease が生きている別の active mission が GitHub 上に確認できる場合だけ停止する
 
@@ -619,6 +621,7 @@ MVP 実装時の最低ライン:
 
 - `init` 後に設定が生成される
 - `status` が空 state を扱える
+- GitHub 照合失敗時でも `status` がローカル state を表示できる
 - `run` が完了または安全停止する
 
 ## 将来の拡張ポイント
