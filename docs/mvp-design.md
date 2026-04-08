@@ -1,0 +1,533 @@
+# MVP Design
+
+## この文書の目的
+
+この文書は、`solo-agent-shinobi` を最初に実装可能な形へ落とし込むための MVP 設計を定義します。
+
+- `README.md`: プロダクト概要
+- `docs/product-spec.md`: 外部仕様
+- `docs/architecture.md`: モジュール責務
+- `docs/mvp-design.md`: 実装開始に必要な具体設計
+
+対象は最初の 1 本の実装ラインです。将来の拡張余地は残しますが、MVP に不要な複雑さは入れません。
+
+## MVP の到達点
+
+MVP が満たすべきこと:
+
+1. `shinobi run` または `shinobi run --issue <id>` で 1 Issue を処理できる
+2. GitHub の label / comment / PR を主要な状態管理として扱える
+3. ローカルに最小 state を保存し、途中停止から再開できる
+4. 停止条件と危険判定により unsafe な自動継続を避けられる
+5. docs 修正、テスト追加、小規模バグ修正のような低リスク任務を完了できる
+
+MVP でやらないこと:
+
+- 複数 Issue の並列処理
+- 複数 agent の協調
+- 高リスク変更の自動マージ
+- 長期の高度な計画最適化
+- 巨大 Issue の自動分割
+
+## 主要ユースケース
+
+### 1. 自動選択で 1 任務を実行する
+
+```bash
+shinobi run
+```
+
+- `shinobi:ready` の Issue を 1 件選ぶ
+- 作業開始コメントを投稿する
+- branch を作る
+- 実装と検証を行う
+- PR を作成または更新する
+- self-review を行う
+- マージ可能ならマージ、危険なら停止する
+
+### 2. 特定 Issue を指定して実行する
+
+```bash
+shinobi run --issue 123
+```
+
+- 指定 Issue が実行可能かを確認する
+- 状態不整合があれば停止して報告する
+
+### 3. 現在の任務状態を確認する
+
+```bash
+shinobi status
+```
+
+- 現在の issue / PR / branch / phase を表示する
+- 最終実行時刻と停止理由を表示する
+
+## CLI 設計
+
+MVP では次の 3 コマンドを優先実装します。
+
+```bash
+shinobi init
+shinobi status
+shinobi run
+```
+
+`plan` `execute` `review` `merge` `watch` は将来分割可能ですが、MVP では内部 phase として持ちます。
+
+### `shinobi init`
+
+- `.shinobi/` ディレクトリを作る
+- `config.yml` の雛形を作る
+- 初回動作に必要な前提を表示する
+
+### `shinobi status`
+
+- ローカル state を読む
+- GitHub 上の Issue / PR 状態を照合する
+- 不整合があれば warning を出す
+
+### `shinobi run`
+
+内部的には次の phase を順に進めます。
+
+1. `select`
+2. `start`
+3. `context`
+4. `execute`
+5. `review`
+6. `merge`
+7. `finalize`
+
+## 実行フロー
+
+```text
+run
+  -> select issue
+  -> acquire mission state
+  -> mark working
+  -> build context
+  -> edit and verify
+  -> push branch / create or update PR
+  -> inspect CI and diff
+  -> retry within limits
+  -> merge or stop
+  -> close issue / report result
+```
+
+### Phase 1: select
+
+入力:
+
+- CLI 引数
+- GitHub Issue 一覧
+- ローカル state
+
+処理:
+
+- `--issue` があればその Issue を対象にする
+- なければ `shinobi:ready` を優先度順で 1 件選ぶ
+- すでに他の active mission が state に残っていれば停止する
+
+出力:
+
+- `MissionCandidate`
+
+### Phase 2: start
+
+処理:
+
+- 実行可能 label を確認する
+- `shinobi:working` を付与する
+- 開始コメントを投稿する
+- `feature/issue-<id>-<slug>` branch を作る
+- `.shinobi/state.json` を更新する
+
+停止条件:
+
+- Issue が closed
+- `shinobi:risky` が付いている
+- 既存 PR や branch が不整合
+
+### Phase 3: context
+
+処理:
+
+- Issue 本文とチェックリストを抽出する
+- 変更対象ファイル候補を最小限推定する
+- `.shinobi/summary.md` と `.shinobi/decisions.md` を読む
+- エージェントへ渡す実行コンテキストを構築する
+
+設計原則:
+
+- repo 全体を読まない
+- Issue に無い要件は原則追加しない
+- 不明点は conservative に扱う
+
+### Phase 4: execute
+
+処理:
+
+- 対象ファイルだけ編集する
+- lint / typecheck / test を実行する
+- 必要なら修正を繰り返す
+- 変更要約を生成する
+
+結果:
+
+- `ExecutionResult`
+
+### Phase 5: review
+
+処理:
+
+- diff 規模を確認する
+- CI 結果を確認する
+- review loop 上限内なら再試行する
+- 危険変更なら `needs-human` に遷移する
+
+主な判定軸:
+
+- changed files 数
+- changed lines 数
+- review loop 回数
+- 失敗テストの種類
+- high-risk path の有無
+
+### Phase 6: merge
+
+処理:
+
+- PR を作成または更新する
+- required checks の成功を待つ
+- auto-merge 対象か判定する
+- 条件を満たせば squash merge する
+
+マージ前提:
+
+- CI green
+- risky でない
+- review 上限未超過
+- issue scope を逸脱していない
+
+### Phase 7: finalize
+
+処理:
+
+- Issue に完了または停止コメントを投稿する
+- label を `shinobi:merged` / `shinobi:blocked` / `shinobi:needs-human` に更新する
+- issue を close するか、継続可能な状態に残す
+- `.shinobi/state.json` を完了状態へ更新する
+
+## 状態モデル
+
+### GitHub 側の状態
+
+```text
+ready -> working -> reviewing -> merged
+                     └-> blocked
+                     └-> needs-human
+```
+
+補助ルール:
+
+- `working` と `reviewing` は同時に付けない
+- `merged` と `blocked` は終端扱い
+- `risky` は補助属性であり phase ではない
+
+### ローカル state
+
+`.shinobi/state.json` の想定例:
+
+```json
+{
+  "active_issue_number": 123,
+  "active_pr_number": 456,
+  "active_branch": "feature/issue-123-login-form",
+  "phase": "review",
+  "review_loop_count": 1,
+  "last_result": "ci_failed",
+  "last_error": null,
+  "updated_at": "2026-04-09T10:00:00+09:00"
+}
+```
+
+設計方針:
+
+- active mission は 0 か 1 のみ
+- state は再開補助であり truth ではない
+- GitHub 側と矛盾したら GitHub を優先する
+
+## ドメインモデル
+
+MVP で必要な主要モデル:
+
+### `Mission`
+
+- issue number
+- title
+- labels
+- branch name
+- pr number
+- risk level
+- phase
+
+### `RunPolicy`
+
+- max review loops
+- max commits per issue
+- max changed files
+- max lines changed
+- max runtime minutes
+- auto merge enabled
+
+### `ExecutionResult`
+
+- changed files
+- changed lines
+- lint status
+- typecheck status
+- test status
+- summary
+- follow-up needed
+
+### `StopDecision`
+
+- reason
+- retryable
+- needs human
+- recommended label
+- comment body
+
+## モジュール責務
+
+MVP では既存アーキテクチャ案を次のように具体化します。
+
+### `cli.py`
+
+- コマンド引数を解釈する
+- 設定読込と phase 実行を開始する
+
+### `config.py`
+
+- `config.yml` を読む
+- default 値を補完する
+- unsafe な設定を起動時に拒否する
+
+### `models.py`
+
+- `Mission`, `RunPolicy`, `ExecutionResult` などを定義する
+
+### `github_client.py`
+
+- Issue 検索
+- label 更新
+- comment 投稿
+- PR 作成 / 更新
+- CI 状態取得
+- merge 実行
+
+### `issue_selector.py`
+
+- ready issue を選ぶ
+- 指定 issue の妥当性を判定する
+
+### `context_builder.py`
+
+- Issue とローカル知識から最小実行コンテキストを組み立てる
+- 読むべきファイル一覧を返す
+
+### `executor.py`
+
+- 実装エージェントを呼び出す
+- 検証コマンドを回す
+- 実行結果を構造化する
+
+### `reviewer.py`
+
+- diff / CI / 停止条件を判定する
+- 再試行可否を返す
+
+### `merger.py`
+
+- auto-merge 対象かを判定する
+- merge と issue close を行う
+
+### `state_store.py`
+
+- `.shinobi/state.json` の保存と復元
+- GitHub state との整合性確認を補助する
+
+## Context Builder 設計
+
+MVP の重要点は「必要最小限しか読まない」ことです。
+
+入力:
+
+- Issue 本文
+- Issue コメントのうち shinobi 関連ログ
+- `.shinobi/summary.md`
+- `.shinobi/decisions.md`
+- 対象ファイル候補
+
+出力:
+
+- 任務要約
+- 完了条件
+- スコープ外
+- 参照ファイル一覧
+- 禁止事項
+
+対象ファイル候補の作り方:
+
+1. Issue 本文に明示されたパスを優先する
+2. ラベルから area を推定する
+3. 既存 PR があればその diff 周辺を優先する
+4. 候補が広すぎる場合は停止寄りにする
+
+## 安全設計
+
+### 停止すべきケース
+
+- Issue 要件が曖昧で完了条件がない
+- 差分が上限を超える
+- 危険領域のファイルを変更する必要がある
+- CI 失敗が再試行上限を超えた
+- 既存 branch / PR の整合性が取れない
+
+### high-risk path 例
+
+- `migrations/`
+- `infra/`
+- `auth/`
+- `billing/`
+- secrets や権限設定を含むファイル
+
+high-risk path は config で追加可能にします。
+
+### 停止時の標準動作
+
+1. state に理由を記録する
+2. Issue / PR に短い報告を投稿する
+3. `shinobi:needs-human` か `shinobi:blocked` を付ける
+4. 危険な自動継続をやめる
+
+## 設定ファイル設計
+
+`config.yml` 例:
+
+```yaml
+repo: owner/repo
+main_branch: main
+labels:
+  ready: shinobi:ready
+  working: shinobi:working
+  reviewing: shinobi:reviewing
+  blocked: shinobi:blocked
+  needs_human: shinobi:needs-human
+  merged: shinobi:merged
+  risky: shinobi:risky
+limits:
+  max_review_loops: 3
+  max_commits_per_issue: 8
+  max_changed_files: 20
+  max_lines_changed: 800
+  max_runtime_minutes: 30
+merge:
+  auto_merge: true
+  draft_pr: true
+  method: squash
+safety:
+  high_risk_paths:
+    - migrations/
+    - infra/
+    - auth/
+    - billing/
+```
+
+方針:
+
+- MVP では 1 repo 専用 config を前提にする
+- 環境変数は token や secret のみを扱う
+- label 名や上限値は config で変えられる
+
+## エラーハンドリング方針
+
+エラーは次の 3 種に分けます。
+
+### `retryable`
+
+- 一時的な GitHub API failure
+- flaky test
+- CI 待機タイムアウト
+
+挙動:
+
+- 規定回数だけ再試行する
+
+### `mission_blocked`
+
+- 要件不明
+- branch 競合
+- 高リスク変更
+
+挙動:
+
+- `blocked` または `needs-human` にして停止する
+
+### `fatal`
+
+- config 不正
+- 認証不備
+- state 読み書き不能
+
+挙動:
+
+- 実行を即停止し、ローカルに理由を残す
+
+## 観測性
+
+MVP では大げさな telemetry は入れず、次を残します。
+
+- `.shinobi/logs/<timestamp>.log`
+- GitHub Issue / PR への短い進捗コメント
+- `summary.md` への短い更新
+
+重要なのは完全な思考履歴ではなく、再開に必要な要約です。
+
+## テスト計画
+
+MVP 実装時の最低ライン:
+
+### 単体テスト
+
+- Issue 選択
+- label 遷移
+- branch 名生成
+- stop condition 判定
+- auto-merge 判定
+
+### 結合テスト
+
+- `run --issue <id>` の happy path
+- review loop 上限超過時の停止
+- GitHub state とローカル state の不整合検出
+
+### 手動確認
+
+- `init` 後に設定が生成される
+- `status` が空 state を扱える
+- `run` が完了または安全停止する
+
+## 将来の拡張ポイント
+
+MVP 後の候補:
+
+- `plan` `execute` `review` `merge` の明示コマンド分離
+- `watch` モード
+- slash command 連携
+- follow-up Issue の自動作成
+- metrics 可視化
+- repo 特性ごとの risk policy 強化
+
+MVP では、これらのために interface を分けつつも、まだ過剰抽象化しません。
