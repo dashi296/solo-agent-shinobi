@@ -95,9 +95,10 @@ shinobi run
 2. `start`
 3. `context`
 4. `execute`
-5. `review`
-6. `merge`
-7. `finalize`
+5. `publish`
+6. `review`
+7. `merge`
+8. `finalize`
 
 ## 実行フロー
 
@@ -177,7 +178,15 @@ run
 
 - `ExecutionResult`
 
-### Phase 5: review
+### Phase 5: publish
+
+処理:
+
+- PR を作成または更新する
+- `shinobi:reviewing` へ遷移する
+- diff と CI を review phase から参照できる状態にする
+
+### Phase 6: review
 
 処理:
 
@@ -195,11 +204,10 @@ run
 - high-risk path の有無
 - `shinobi:risky` label の有無
 
-### Phase 6: merge
+### Phase 7: merge
 
 処理:
 
-- PR を作成または更新する
 - required checks の成功を待つ
 - auto-merge 対象か判定する
 - 条件を満たせば squash merge する
@@ -213,7 +221,7 @@ run
 
 `shinobi:risky` が付いた Issue は実行対象からは外しません。MVP では「実装と PR 更新までは行うが、自動マージはせず `needs-human` に寄せる」扱いにします。
 
-### Phase 7: finalize
+### Phase 8: finalize
 
 処理:
 
@@ -283,6 +291,7 @@ MVP で必要な主要モデル:
 - max changed files
 - max lines changed
 - max runtime minutes
+- max token budget
 - auto merge enabled
 
 ### `ExecutionResult`
@@ -435,6 +444,7 @@ max_commits_per_issue: 8
 max_changed_files: 20
 max_lines_changed: 800
 max_runtime_minutes: 30
+max_token_budget: 40000
 auto_merge: true
 use_draft_pr: true
 merge_method: squash

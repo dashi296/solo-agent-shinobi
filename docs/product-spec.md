@@ -138,6 +138,7 @@ max_commits_per_issue: 8
 max_changed_files: 20
 max_lines_changed: 800
 max_runtime_minutes: 30
+max_token_budget: 40000
 auto_merge: true
 use_draft_pr: true
 merge_method: squash
