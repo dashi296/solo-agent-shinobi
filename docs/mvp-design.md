@@ -137,7 +137,7 @@ run
 - `--issue` の対象に GitHub 上の active mission または local-only mission が残っていれば、その mission だけ resume 可否を判定する
 - `--issue` の対象以外に lease が生きている active mission または retryable な local-only mission が見つかった場合は、別 mission への横滑りを避けるため停止する
 - `--issue` がない場合だけ、stale な active mission が state にだけ残っているかを確認する
-- local-only mission で、対応する branch が存在し retry 可能なら、その branch と state を使って同じ mission を再開する
+- local-only mission で、対応する branch が存在し、state に `retryable_local_only: true` が残り、かつ最後の Shinobi コメントまたは local log に retryable な `start` 失敗記録がある場合だけ、その branch と state を使って同じ mission を再開する
 - local-only mission でなく GitHub 上にも対応する active 状態が無い場合は、GitHub の状態を優先して state を修復する
 - GitHub 側に `shinobi:working` / `shinobi:reviewing` が残っている場合は lease と PR / branch の生存確認で stale 判定する
 - stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する
@@ -159,13 +159,13 @@ run
 - provisional な `.shinobi/state.json` を更新する
 - `shinobi:working` を付与する
 - `shinobi:ready` を除去する
-- lease 情報と recovery 用メタデータを含む開始コメントを投稿する
+- lease 情報と recovery 用メタデータを含む machine-readable な mission-state コメントを投稿または更新する
 - lease を `now + mission_lease_minutes` で初期化する
 
 fatal 時の補償動作:
 
-- branch 作成または state 更新後に GitHub 更新へ失敗した場合は、その mission を `start` 未完了の local-only mission として retryable に残す
-- local-only mission は次回 run の reconciliation で branch / issue 番号 / phase を照合して resume または cleanup 判定する
+- branch 作成または state 更新後に GitHub 更新へ失敗した場合は、その mission を `start` 未完了の local-only mission として retryable に残し、state に `retryable_local_only: true` と失敗理由を記録する
+- local-only mission は次回 run の reconciliation で branch / issue 番号 / phase を照合し、Shinobi 自身が残した retryable 記録がある場合だけ resume または cleanup 判定する
 - GitHub の active label 更新後に fatal が起きた場合は、active label を外して `shinobi:needs-human` を付け、fatal 理由を Issue に投稿する
 
 停止条件:
@@ -213,6 +213,7 @@ fatal 時の補償動作:
 - PR を作成または更新する
 - `shinobi:reviewing` へ遷移する
 - `shinobi:working` と `shinobi:ready` を除去する
+- machine-readable な mission-state コメントを `phase: publish` と最新 `pr` で更新する
 - publish 完了時に lease heartbeat を更新する
 - diff と CI を review phase から参照できる状態にする
 
@@ -223,6 +224,7 @@ fatal 時の補償動作:
 - diff 規模を確認する
 - publish 後の diff を再確認し、execute 時点で見逃した high-risk path や scope 逸脱があれば `needs-human` に遷移する
 - CI 待機の前後と polling 中に lease heartbeat を更新する
+- machine-readable な mission-state コメントを `phase: review` と最新 `lease_expires_at` で更新し続ける
 - CI 結果を確認する
 - review loop 上限内なら再試行する
 
@@ -268,6 +270,8 @@ fatal 時の補償動作:
 
 ```text
 ready -> working -> reviewing -> merged
+       └-> blocked
+       └-> needs-human
                      └-> blocked
                      └-> needs-human
 ```
@@ -292,6 +296,7 @@ ready -> working -> reviewing -> merged
   "run_id": "20260409T100000-issue-123",
   "phase": "review",
   "review_loop_count": 1,
+  "retryable_local_only": false,
   "lease_expires_at": "2026-04-09T10:30:00+09:00",
   "last_result": "ci_failed",
   "last_error": null,
@@ -313,6 +318,7 @@ ready -> working -> reviewing -> merged
 - 直近の完了または停止結果を `last_completed_mission` に保持する
 - active mission には `run_id` を保持し、local-only mission と stale recovery の同一性確認に使う
 - state は再開補助であり truth ではないが、`start` 未完了の local-only mission を回復するための一次手掛かりとして扱う
+- local-only mission の resume は state 単独では許可せず、Shinobi 自身が残した retryable 記録で裏付ける
 - GitHub 側と矛盾したら GitHub を優先する
 - run の先頭で reconciliation してから active mission 判定を行う
 - active mission には lease を持たせ、期限切れなら stale recovery 対象にする
@@ -324,6 +330,7 @@ ready -> working -> reviewing -> merged
 
 - start: `shinobi:working` を付与し、`shinobi:ready` を除去する
 - publish: `shinobi:reviewing` を付与し、`shinobi:ready` と `shinobi:working` を除去する
+- pre-publish stop: `shinobi:blocked` または `shinobi:needs-human` を付与し、`shinobi:ready` と `shinobi:working` を除去する
 - finalize merged: `shinobi:merged` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
 - finalize blocked: `shinobi:blocked` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
 - finalize needs-human: `shinobi:needs-human` を付与し、`shinobi:ready` `shinobi:working` `shinobi:reviewing` を除去する
@@ -449,6 +456,8 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 
 Shinobi 関連ログは自由文検索ではなく、HTML comment marker と key-value 行を持つ machine-readable schema を前提にします。最低でも `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `run_id` を含めます。
 
+同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。stale recovery は最新の mission-state comment の値を truth 候補として参照し、古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。
+
 出力:
 
 - 任務要約
@@ -483,8 +492,8 @@ MVP では interrupted run からの自動回復をサポートします。
 - `--issue` の対象そのものに lease が有効な active mission があり、対応する PR または branch が存在する場合は、その同一 mission を resume する
 - `--issue` が無い通常 run では、lease が有効で対応する PR または branch が存在する active mission を 1 件だけ resume する
 - 指定対象以外に lease が有効な active mission がある場合は、新規 run や別 mission への切替はせず停止する
-- GitHub 上に active label が無くても、local-only mission の branch と state が残っている場合は cleanup 前に resume 可否を判定する
-- local-only mission の resume は、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と矛盾しない場合に限る
+- GitHub 上に active label が無くても、local-only mission の branch と state が残っていて、かつ Shinobi 自身が残した retryable な `start` 失敗記録がある場合だけ cleanup 前に resume 可否を判定する
+- local-only mission の resume は、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と矛盾せず、`retryable_local_only: true` が残っている場合に限る
 - lease が期限切れでも、対応する PR または branch から state を再構築できる場合は、その mission を resume する
 - lease が期限切れで、PR / branch / machine-readable な Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
 - stale recovery を行ったときは Issue に recovery comment を残す

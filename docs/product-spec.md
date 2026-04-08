@@ -118,7 +118,7 @@ shinobi watch
 - review loop
 - merge 判定
 
-`--issue <id>` を指定した場合は、その Issue を最優先で扱います。対象 Issue 自身の active mission は resume してよいですが、別 Issue の active mission や local-only mission が残っている場合は横取りせず停止します。
+`--issue <id>` を指定した場合は、その Issue を最優先で扱います。対象 Issue 自身の active mission は resume してよいですが、別 Issue の active mission や、Shinobi 自身が retryable と記録した local-only mission が残っている場合は横取りせず停止します。
 
 ### `shinobi status`
 
@@ -208,8 +208,8 @@ high-risk path は context で候補抽出し、execute 完了前に publish 可
 MVP では interrupted run からの回復を手動 cleanup 前提にしません。
 
 - `shinobi:working` または `shinobi:reviewing` が残っている場合、tool は lease と PR / branch の生存確認で stale 判定する
-- GitHub 上に active label が無くても、`start` 未完了の local-only mission が branch と state に残っていれば resume 可否を先に判定する
-- local-only mission を resume してよいのは、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と整合する場合に限る
+- GitHub 上に active label が無くても、`start` 未完了の local-only mission が branch と state に残り、かつ Shinobi 自身が retryable と記録した場合に限って resume 可否を先に判定する
+- local-only mission を resume してよいのは、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と整合し、`retryable_local_only: true` が残っている場合に限る
 - lease は execute 中に `mission_heartbeat_interval_minutes` ごとに定期更新し、加えて phase 遷移、retry、CI polling のたびに heartbeat 更新する
 - `--issue <id>` 指定時は、その Issue 自身の active mission だけ resume 対象にする
 - `--issue <id>` の対象外に active mission や retryable な local-only mission がある場合は、別 mission の横取りを避けるため停止する
@@ -232,6 +232,11 @@ shinobi:ready
 停止:
 
 ```text
+shinobi:working
+  -> shinobi:blocked
+or
+  -> shinobi:needs-human
+
 shinobi:reviewing
   -> shinobi:blocked
 or
@@ -265,6 +270,8 @@ Shinobi Start
 ```
 
 開始・recovery 用の Shinobi コメントは、自由文だけではなく machine-readable な marker と固定 key を含めます。最低キーは `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `run_id` です。
+
+同じ mission では、この comment を publish / review / recovery のたびに upsert し、`phase` `pr` `lease_expires_at` を最新値へ更新します。stale recovery は最新の machine-readable comment と local / PR metadata が整合する場合だけ行います。
 
 レビュー中:
 
