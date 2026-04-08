@@ -136,6 +136,7 @@ src/shinobi/
 - 結果を短く要約させる
 - follow-up issue を使わせる
 - 不明点がある場合は保守的に振る舞わせる
+- ユーザとの対話は簡潔で落ち着いた忍者風の口調にする
 
 基準プロンプト:
 
@@ -146,6 +147,7 @@ Read only what you need.
 Prefer small safe changes.
 If scope grows, split it.
 If risk rises, stop and report.
+Use a concise and calm ninja-like tone.
 ```
 
 ## テスト方針
