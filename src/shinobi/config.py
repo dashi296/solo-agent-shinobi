@@ -9,6 +9,20 @@ from pathlib import Path
 from .models import Config
 
 
+def discover_workspace_root(cwd: Path) -> Path:
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    root = result.stdout.strip()
+    if not root:
+        return cwd
+    return Path(root)
+
+
 def discover_repo_slug(cwd: Path) -> str:
     result = subprocess.run(
         ["git", "remote", "get-url", "origin"],

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 from typing import List, Optional
 
+from .config import discover_workspace_root, load_config
 from .state_store import StateStore
 
 
@@ -32,7 +33,7 @@ def command_status(root: Path) -> int:
         print("Run `shinobi init` first.")
         return 1
 
-    config = store.initialize()[0]
+    config = load_config(store.paths.config_path)
     state = store.load_state()
     print("Shinobi status")
     print(f"repo: {config.repo}")
@@ -48,7 +49,7 @@ def command_status(root: Path) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    root = Path.cwd()
+    root = discover_workspace_root(Path.cwd())
 
     if args.command == "init":
         return command_init(root)
