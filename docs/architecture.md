@@ -41,6 +41,7 @@ GitHub Actions
 - 現在の issue 番号
 - 現在の PR 番号
 - 現在の branch 名
+- 現在の agent_identity
 - 現在の run_id
 - 現在の phase
 - review loop 回数
@@ -172,6 +173,7 @@ Use a concise and calm ninja-like tone.
 - review loop の遷移
 - 失敗時の `needs-human` 化
 - `--issue` 指定時に別 mission を横取りしないこと
+- `agent_identity` 不一致の stale mission を resume しないこと
 
 ### 手動確認
 
