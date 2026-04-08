@@ -41,8 +41,12 @@ GitHub Actions
 - 現在の issue 番号
 - 現在の PR 番号
 - 現在の branch 名
+- 現在の phase
 - review loop 回数
+- active mission の lease 期限
 - 最終実行結果
+- 最終エラー
+- 直近の完了または停止 mission の要約
 
 ### `.shinobi/summary.md`
 

@@ -152,6 +152,7 @@ run
 - `shinobi:working` を付与する
 - `shinobi:ready` を除去する
 - lease 情報を含む開始コメントを投稿する
+- lease を `now + mission_lease_minutes` で初期化する
 
 fatal 時の補償動作:
 
@@ -184,6 +185,7 @@ fatal 時の補償動作:
 処理:
 
 - 対象ファイルだけ編集する
+- 長時間処理に入る前と各 retry 後に lease heartbeat を更新する
 - lint / typecheck / test を実行する
 - 必要なら修正を繰り返す
 - 変更要約を生成する
@@ -199,6 +201,7 @@ fatal 時の補償動作:
 - PR を作成または更新する
 - `shinobi:reviewing` へ遷移する
 - `shinobi:working` と `shinobi:ready` を除去する
+- publish 完了時に lease heartbeat を更新する
 - diff と CI を review phase から参照できる状態にする
 
 ### Phase 6: review
@@ -206,9 +209,10 @@ fatal 時の補償動作:
 処理:
 
 - diff 規模を確認する
+- CI 待機の前後と polling 中に lease heartbeat を更新する
 - CI 結果を確認する
 - review loop 上限内なら再試行する
-- 危険変更なら `needs-human` に遷移する
+- high-risk path を検知したら `needs-human` に遷移する
 
 主な判定軸:
 
@@ -234,7 +238,7 @@ fatal 時の補償動作:
 - review 上限未超過
 - issue scope を逸脱していない
 
-`shinobi:risky` が付いた Issue は実行対象からは外しません。MVP では「実装と PR 更新までは行うが、自動マージはせず `needs-human` に寄せる」扱いにします。
+`shinobi:risky` が付いた Issue は実行対象からは外しません。MVP では「実装と PR 更新までは行うが、自動マージはせず `needs-human` に寄せる」扱いにします。これは issue-level の merge policy であり、high-risk path のような実装停止条件とは別に扱います。
 
 ### Phase 8: finalize
 
@@ -262,6 +266,7 @@ ready -> working -> reviewing -> merged
 - `merged` と `blocked` は終端扱い
 - `risky` は補助属性であり phase ではない
 - `risky` は start を止める label ではなく、auto-merge を止める label として扱う
+- `risky` は issue-level の manual merge 指示であり、high-risk path は publish 前でも停止しうる execution risk として扱う
 
 ### ローカル state
 
@@ -297,6 +302,7 @@ ready -> working -> reviewing -> merged
 - GitHub 側と矛盾したら GitHub を優先する
 - run の先頭で reconciliation してから active mission 判定を行う
 - active mission には lease を持たせ、期限切れなら stale recovery 対象にする
+- lease は start / publish / review / retry / CI polling ごとに heartbeat 更新する
 
 ### ラベル遷移ルール
 
@@ -327,6 +333,7 @@ MVP で必要な主要モデル:
 ### `RunPolicy`
 
 - mission lease minutes
+- mission heartbeat interval minutes
 - max review loops
 - max commits per issue
 - max changed files
@@ -461,6 +468,16 @@ MVP では interrupted run からの自動回復をサポートします。
 - lease が期限切れでも、対応する PR または branch から state を再構築できる場合は、その mission を resume する
 - lease が期限切れで、PR / branch / 最新の Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
 - stale recovery を行ったときは Issue に recovery comment を残す
+- lease は phase 遷移時、retry 時、CI polling 中に heartbeat 更新される前提なので、期限切れは interruption の強いシグナルとして扱う
+
+### risk policy
+
+MVP では次の 2 種類を分けて扱います。
+
+- `shinobi:risky`: Issue-level の manual merge 指示。publish までは進めるが auto-merge はしない
+- high-risk path: execution risk。対象ファイルが `migrations/` `infra/` `auth/` `billing/` などに触れる必要があるなら publish 前でも停止しうる
+
+high-risk path を検知した場合は、PR 未作成ならそのまま `needs-human` か `blocked` に遷移します。PR 作成後に検知した場合は PR を残したまま `needs-human` に遷移します。
 
 ### high-risk path 例
 
@@ -494,6 +511,7 @@ needs_human_label: shinobi:needs-human
 merged_label: shinobi:merged
 risky_label: shinobi:risky
 mission_lease_minutes: 30
+mission_heartbeat_interval_minutes: 5
 max_review_loops: 3
 max_commits_per_issue: 8
 max_changed_files: 20

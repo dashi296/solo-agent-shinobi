@@ -139,6 +139,7 @@ needs_human_label: shinobi:needs-human
 merged_label: shinobi:merged
 risky_label: shinobi:risky
 mission_lease_minutes: 30
+mission_heartbeat_interval_minutes: 5
 max_review_loops: 3
 max_commits_per_issue: 8
 max_changed_files: 20
@@ -202,6 +203,7 @@ max_token_budget: 40000
 MVP では interrupted run からの回復を手動 cleanup 前提にしません。
 
 - `shinobi:working` または `shinobi:reviewing` が残っている場合、tool は lease と PR / branch の生存確認で stale 判定する
+- lease は phase 遷移、retry、CI polling のたびに heartbeat 更新する
 - stale でなければ、その active mission を優先して resume する
 - stale で、かつ PR / branch / Shinobi コメントから再開情報を復元できなければ、active label を外して `shinobi:needs-human` に遷移する
 - recovery や cleanup を行った場合は Issue にコメントを残す
