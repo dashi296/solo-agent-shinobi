@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -82,6 +84,48 @@ class CliTest(unittest.TestCase):
             self.assertFalse(store.paths.decisions_path.exists())
             self.assertFalse(store.paths.lock_path.exists())
 
+    def test_init_repairs_state_agent_identity_when_config_is_recreated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    original_state = store.load_state()
+                    store.paths.config_path.unlink()
+
+                    with redirect_stdout(io.StringIO()):
+                        exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            repaired_config = json.loads(store.paths.config_path.read_text(encoding="utf-8"))
+            repaired_state = store.load_state()
+            self.assertNotEqual(original_state.agent_identity, repaired_config["agent_identity"])
+            self.assertEqual(repaired_state.agent_identity, repaired_config["agent_identity"])
+
+    def test_status_warns_when_state_file_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    store.paths.state_path.write_text("{broken", encoding="utf-8")
+
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        exit_code = cli.main(["status"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("Shinobi status", rendered)
+            self.assertIn("warning: failed to load local state:", rendered)
+            self.assertIn("repo: owner/repo", rendered)
+
     def test_init_uses_git_workspace_root_from_subdirectory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -99,6 +143,24 @@ class CliTest(unittest.TestCase):
             self.assertTrue((root / ".shinobi").exists())
             self.assertFalse((nested / ".shinobi").exists())
             self.assertIn(str(root / ".shinobi"), output.getvalue())
+
+    def test_packaging_declares_shinobi_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            wheel_dir = Path(tmp_dir)
+            project_root = Path(__file__).resolve().parents[1]
+            with patch("pathlib.Path.cwd", return_value=project_root):
+                with patch.object(sys, "argv", ["pip", "wheel", ".", "--no-deps", "--no-build-isolation", "-w", str(wheel_dir)]):
+                    import pip._internal.cli.main as pip_main
+
+                    exit_code = pip_main.main()
+
+            self.assertEqual(exit_code, 0)
+            wheel_path = next(wheel_dir.glob("*.whl"))
+            with zipfile.ZipFile(wheel_path) as wheel:
+                names = wheel.namelist()
+
+            self.assertTrue(any(name.startswith("shinobi/") for name in names))
+            self.assertTrue(any(name.endswith(".dist-info/entry_points.txt") for name in names))
 
 
 if __name__ == "__main__":

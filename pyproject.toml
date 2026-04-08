@@ -17,3 +17,6 @@ shinobi = "shinobi.cli:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools]
+packages = ["shinobi"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Tuple
 
@@ -83,6 +84,10 @@ class StateStore:
             state = State(agent_identity=config.agent_identity)
             self.save_state(state)
 
+        if state.agent_identity != config.agent_identity:
+            state.agent_identity = config.agent_identity
+            self.save_state(state)
+
         if not self.paths.summary_path.exists():
             self.paths.summary_path.write_text(SUMMARY_TEMPLATE, encoding="utf-8")
         if not self.paths.decisions_path.exists():
@@ -94,6 +99,12 @@ class StateStore:
 
     def load_state(self) -> State:
         return State.from_dict(json.loads(self.paths.state_path.read_text(encoding="utf-8")))
+
+    def try_load_state(self) -> Tuple[State | None, str | None]:
+        try:
+            return self.load_state(), None
+        except (OSError, JSONDecodeError, TypeError, ValueError) as error:
+            return None, str(error)
 
     def save_state(self, state: State) -> None:
         self.paths.state_path.write_text(

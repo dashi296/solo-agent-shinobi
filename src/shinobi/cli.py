@@ -33,8 +33,22 @@ def command_status(root: Path) -> int:
         print("Run `shinobi init` first.")
         return 1
 
-    config = load_config(store.paths.config_path)
-    state = store.load_state()
+    try:
+        config = load_config(store.paths.config_path)
+    except (OSError, ValueError, TypeError) as error:
+        print("Shinobi status")
+        print(f"warning: failed to load config: {error}")
+        return 1
+
+    state, state_error = store.try_load_state()
+    if state is None:
+        print("Shinobi status")
+        print(f"repo: {config.repo}")
+        print(f"agent_identity: {config.agent_identity}")
+        print(f"warning: failed to load local state: {state_error}")
+        print("github_status: unavailable in foundations MVP")
+        return 1
+
     print("Shinobi status")
     print(f"repo: {config.repo}")
     print(f"agent_identity: {config.agent_identity}")
