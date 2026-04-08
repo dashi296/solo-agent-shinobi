@@ -52,6 +52,8 @@ shinobi run --issue 123
 ```
 
 - 指定 Issue が実行可能かを確認する
+- 指定 Issue 自身の active mission があればその mission を resume する
+- 別 Issue の active mission や local-only mission が残っている場合は横取りせず停止する
 - 状態不整合があれば停止して報告する
 
 ### 3. 現在の任務状態を確認する
@@ -130,14 +132,16 @@ run
 処理:
 
 - run 開始時に GitHub の Issue / PR / label 状態と `.shinobi/state.json` を reconciliation する
-- stale な active mission が state にだけ残っている場合は、それが `start` 未完了の local-only mission かを先に判定する
+- `--issue` がある場合は、その Issue を最優先の mission candidate に固定する
+- `--issue` の対象に GitHub 上の active mission または local-only mission が残っていれば、その mission だけ resume 可否を判定する
+- `--issue` の対象以外に lease が生きている active mission または retryable な local-only mission が見つかった場合は、別 mission への横滑りを避けるため停止する
+- `--issue` がない場合だけ、stale な active mission が state にだけ残っているかを確認する
 - local-only mission で、対応する branch が存在し retry 可能なら、その branch と state を使って同じ mission を再開する
 - local-only mission でなく GitHub 上にも対応する active 状態が無い場合は、GitHub の状態を優先して state を修復する
 - GitHub 側に `shinobi:working` / `shinobi:reviewing` が残っている場合は lease と PR / branch の生存確認で stale 判定する
 - stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する
 - stale かつ再開不能なら、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
-- `--issue` があればその Issue を対象にする
-- なければ `shinobi:ready` を優先度順で 1 件選ぶ
+- `--issue` がなければ `shinobi:ready` を優先度順で 1 件選ぶ
 - reconciliation 後も lease が生きている別の active mission が GitHub 上に確認できる場合だけ停止する
 
 出力:
@@ -153,7 +157,7 @@ run
 - provisional な `.shinobi/state.json` を更新する
 - `shinobi:working` を付与する
 - `shinobi:ready` を除去する
-- lease 情報を含む開始コメントを投稿する
+- lease 情報と recovery 用メタデータを含む開始コメントを投稿する
 - lease を `now + mission_lease_minutes` で初期化する
 
 fatal 時の補償動作:
@@ -430,12 +434,14 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 入力:
 
 - Issue 本文
-- Issue コメントのうち shinobi 関連ログ
+- Issue コメントのうち marker 付きの shinobi 関連ログ
 - `.shinobi/summary.md`
 - `.shinobi/decisions.md`
 - 対象ファイル候補
 
 初回 run では `init` が生成した空テンプレートを読む前提にします。欠損時は fatal にはせず、空ファイル相当として扱います。
+
+Shinobi 関連ログは自由文検索ではなく、HTML comment marker と key-value 行を持つ machine-readable schema を前提にします。最低でも `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `run_id` を含めます。
 
 出力:
 
@@ -468,10 +474,12 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 MVP では interrupted run からの自動回復をサポートします。
 
 - active label が付いた Issue を見つけたら、まず lease の期限切れ有無を確認する
-- lease が有効で、対応する PR または branch が存在する場合は active mission とみなし、新規 run は停止する
+- `--issue` の対象そのものに lease が有効な active mission があり、対応する PR または branch が存在する場合は、その同一 mission を resume する
+- `--issue` が無い通常 run では、lease が有効で対応する PR または branch が存在する active mission を 1 件だけ resume する
+- 指定対象以外に lease が有効な active mission がある場合は、新規 run や別 mission への切替はせず停止する
 - GitHub 上に active label が無くても、local-only mission の branch と state が残っている場合は cleanup 前に resume 可否を判定する
 - lease が期限切れでも、対応する PR または branch から state を再構築できる場合は、その mission を resume する
-- lease が期限切れで、PR / branch / 最新の Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
+- lease が期限切れで、PR / branch / machine-readable な Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
 - stale recovery を行ったときは Issue に recovery comment を残す
 - lease は execute 中の定期更新と、phase 遷移時、retry 時、CI polling 中の heartbeat 更新を前提にする
 - そのため lease 期限切れは interruption の強いシグナルとして扱う
@@ -602,8 +610,10 @@ MVP 実装時の最低ライン:
 ### 結合テスト
 
 - `run --issue <id>` の happy path
+- `run --issue <id>` 実行時に別 Issue の active mission が残っていた場合の安全停止
 - review loop 上限超過時の停止
 - GitHub state とローカル state の不整合検出
+- machine-readable な Shinobi コメントからの recovery
 
 ### 手動確認
 

@@ -169,6 +169,7 @@ Use a concise and calm ninja-like tone.
 - Issue から PR 作成までのフロー
 - review loop の遷移
 - 失敗時の `needs-human` 化
+- `--issue` 指定時に別 mission を横取りしないこと
 
 ### 手動確認
 
