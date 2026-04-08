@@ -105,6 +105,8 @@ shinobi watch
 
 - `.shinobi/` を作成する
 - 初期 config を作成する
+- workspace-local な `.shinobi/install.json` を作成する
+- workspace / installation ごとに一意な `agent_identity` を生成して `.shinobi/install.json` に保存する
 - GitHub ラベルの推奨セットを案内する
 
 ### `shinobi run`
@@ -208,13 +210,15 @@ high-risk path は context で候補抽出し、execute 完了前に publish 可
 MVP では interrupted run からの回復を手動 cleanup 前提にしません。
 
 - `shinobi:working` または `shinobi:reviewing` が残っている場合、tool は lease と PR / branch の生存確認で stale 判定する
+- 同一 workspace の同時実行は `.shinobi/run.lock` で防ぎ、lock owner でない run は同じ `agent_identity` の mission でも resume しない
+- `.shinobi/run.lock` は `pid` が既に存在しない場合は lease 満了前でも stale とみなせる。`pid` を確認できない環境では `heartbeat_at + mission_lease_minutes` を stale 判定に使う
 - GitHub 上に active label が無くても、`start` 未完了の local-only mission が branch と state に残り、かつ Shinobi 自身が retryable と記録した場合に限って resume 可否を先に判定する
-- local-only mission を resume してよいのは、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と整合し、`retryable_local_only: true` が残っている場合に限る
+- local-only mission を resume してよいのは、`.shinobi/install.json` の `agent_identity` と state または local log の `agent_identity` が一致し、state に保存した `run_id`, `issue`, `branch`, `phase` が branch 実体と整合し、`retryable_local_only: true` が残っている場合に限る
 - lease は execute 中に `mission_heartbeat_interval_minutes` ごとに定期更新し、加えて phase 遷移、retry、CI polling のたびに heartbeat 更新する
 - `--issue <id>` 指定時は、その Issue 自身の active mission だけ resume 対象にする
 - `--issue <id>` の対象外に active mission や retryable な local-only mission がある場合は、別 mission の横取りを避けるため停止する
-- 通常 run では stale でない active mission が 1 件だけある場合に限って、その same mission を resume する
-- stale な mission を自動 resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元できる場合に限る
+- 通常 run では stale でない active mission は live mission として扱い、lock owner でない新しい run は停止する
+- stale な mission を自動 resume してよいのは、machine-readable な Shinobi コメントと local / PR metadata から `agent_identity`, `run_id`, `issue`, `branch`, `phase`, `pr` を整合付きで復元でき、`.shinobi/install.json` の `agent_identity` と一致する場合に限る
 - stale で、かつ上記の再開情報を復元できなければ、PR / branch が残っていても active label を外して `shinobi:needs-human` に遷移する
 - recovery や cleanup を行った場合は Issue にコメントを残す
 
@@ -256,22 +260,24 @@ or
 開始時:
 
 ```md
-<!-- shinobi:mission-state -->
+<!-- shinobi:mission-state
+issue: 123
+branch: feature/issue-123-login-form
+phase: start
+pr: null
+lease_expires_at: 2026-04-09T10:30:00+09:00
+agent_identity: repo-local-7f3a2c
+run_id: 20260409T100000-issue-123
+-->
 Shinobi Start
 
 任務 #123 に着手します。
-- issue: 123
-- branch: feature/issue-123-login-form
-- phase: start
-- pr: null
-- lease_expires_at: 2026-04-09T10:30:00+09:00
-- run_id: 20260409T100000-issue-123
 - scope: issue body の要件内に限定
 ```
 
-開始・recovery 用の Shinobi コメントは、自由文だけではなく machine-readable な marker と固定 key を含めます。最低キーは `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `run_id` です。
+開始・recovery 用の Shinobi コメントは、自由文だけではなく machine-readable な marker と固定 key を含めます。最低キーは `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `agent_identity`, `run_id` です。
 
-同じ mission では、この comment を publish / review / recovery のたびに upsert し、`phase` `pr` `lease_expires_at` を最新値へ更新します。stale recovery は最新の machine-readable comment と local / PR metadata が整合する場合だけ行います。
+同じ mission では、この comment を publish / review / recovery のたびに upsert し、`phase` `pr` `lease_expires_at` を最新値へ更新します。stale recovery は最新の machine-readable comment と local / PR metadata が整合し、`.shinobi/install.json` の `agent_identity` と一致する場合だけ行います。
 
 レビュー中:
 

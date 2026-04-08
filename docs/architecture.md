@@ -29,12 +29,20 @@ GitHub Actions
 
 ```text
 .shinobi/
+  install.json
   state.json
   summary.md
   decisions.md
+  run.lock
   logs/
   cache/
 ```
+
+### `.shinobi/install.json`
+
+- workspace-local な install metadata を保持する
+- `agent_identity` を保存する
+- repo 共有設定には含めない
 
 ### `.shinobi/state.json`
 
@@ -48,6 +56,14 @@ GitHub Actions
 - 最終実行結果
 - 最終エラー
 - 直近の完了または停止 mission の要約
+
+### `.shinobi/run.lock`
+
+- 同一 workspace で live run を 1 つに制限するローカル排他ファイル
+- `agent_identity`, `run_id`, `pid`, `started_at`, `heartbeat_at` を保持する
+- 同一 host で `pid` が既に存在しない場合は、lease 満了前でも stale lock とみなしてよい
+- `pid` を確認できない環境では `heartbeat_at + mission_lease_minutes` を過ぎた lock を stale とみなす
+- stale でない live mission への二重 attach を防ぐ
 
 ### `.shinobi/summary.md`
 
@@ -171,6 +187,8 @@ Use a concise and calm ninja-like tone.
 - review loop の遷移
 - 失敗時の `needs-human` 化
 - `--issue` 指定時に別 mission を横取りしないこと
+- `agent_identity` 不一致の stale mission を resume しないこと
+- `pid` が死んだ `run.lock` を lease 満了前でも stale と判定できること
 
 ### 手動確認
 
