@@ -65,15 +65,16 @@ shinobi status
 
 ## CLI 設計
 
-MVP では次の 3 コマンドを優先実装します。
+MVP では次の 4 コマンドをサポートします。
 
 ```bash
 shinobi init
 shinobi status
 shinobi run
+shinobi run --issue 123
 ```
 
-`plan` `execute` `review` `merge` `watch` は将来分割可能ですが、MVP では内部 phase として持ちます。
+`plan` `execute` `review` `merge` `watch` は将来コマンド候補ですが、MVP では公開コマンドに含めません。
 
 ### `shinobi init`
 
@@ -130,9 +131,12 @@ run
 
 - run 開始時に GitHub の Issue / PR / label 状態と `.shinobi/state.json` を reconciliation する
 - stale な active mission が state にだけ残っている場合は、GitHub の状態を優先して state を修復する
+- GitHub 側に `shinobi:working` / `shinobi:reviewing` が残っている場合は lease と PR / branch の生存確認で stale 判定する
+- stale でなく再開可能なら、その Issue / PR / branch から local state を再構築して同じ mission を再開する
+- stale かつ再開不能なら、active label を外して `shinobi:needs-human` に遷移し、回復不能理由を Issue に記録する
 - `--issue` があればその Issue を対象にする
 - なければ `shinobi:ready` を優先度順で 1 件選ぶ
-- reconciliation 後も GitHub 上で別の active mission が確認できる場合だけ停止する
+- reconciliation 後も lease が生きている別の active mission が GitHub 上に確認できる場合だけ停止する
 
 出力:
 
@@ -143,11 +147,16 @@ run
 処理:
 
 - 実行可能 label を確認する
+- `feature/issue-<id>-<slug>` branch を作る
+- provisional な `.shinobi/state.json` を更新する
 - `shinobi:working` を付与する
 - `shinobi:ready` を除去する
-- 開始コメントを投稿する
-- `feature/issue-<id>-<slug>` branch を作る
-- `.shinobi/state.json` を更新する
+- lease 情報を含む開始コメントを投稿する
+
+fatal 時の補償動作:
+
+- branch 作成または state 更新後に GitHub 更新へ失敗した場合は local state を retryable に残す
+- GitHub の active label 更新後に fatal が起きた場合は、active label を外して `shinobi:needs-human` を付け、fatal 理由を Issue に投稿する
 
 停止条件:
 
@@ -265,6 +274,7 @@ ready -> working -> reviewing -> merged
   "active_branch": "feature/issue-123-login-form",
   "phase": "review",
   "review_loop_count": 1,
+  "lease_expires_at": "2026-04-09T10:30:00+09:00",
   "last_result": "ci_failed",
   "last_error": null,
   "last_completed_mission": {
@@ -286,6 +296,7 @@ ready -> working -> reviewing -> merged
 - state は再開補助であり truth ではない
 - GitHub 側と矛盾したら GitHub を優先する
 - run の先頭で reconciliation してから active mission 判定を行う
+- active mission には lease を持たせ、期限切れなら stale recovery 対象にする
 
 ### ラベル遷移ルール
 
@@ -315,6 +326,7 @@ MVP で必要な主要モデル:
 
 ### `RunPolicy`
 
+- mission lease minutes
 - max review loops
 - max commits per issue
 - max changed files
@@ -438,6 +450,17 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 - 危険領域のファイルを変更する必要がある
 - CI 失敗が再試行上限を超えた
 - 既存 branch / PR の整合性が取れない
+- stale な GitHub active mission が再開不能だった
+
+### stale mission recovery
+
+MVP では interrupted run からの自動回復をサポートします。
+
+- active label が付いた Issue を見つけたら、まず lease の期限切れ有無を確認する
+- lease が有効で、対応する PR または branch が存在する場合は active mission とみなし、新規 run は停止する
+- lease が期限切れでも、対応する PR または branch から state を再構築できる場合は、その mission を resume する
+- lease が期限切れで、PR / branch / 最新の Shinobi コメントからも再開情報を復元できない場合は、active label を除去して `shinobi:needs-human` を付ける
+- stale recovery を行ったときは Issue に recovery comment を残す
 
 ### high-risk path 例
 
@@ -470,6 +493,7 @@ blocked_label: shinobi:blocked
 needs_human_label: shinobi:needs-human
 merged_label: shinobi:merged
 risky_label: shinobi:risky
+mission_lease_minutes: 30
 max_review_loops: 3
 max_commits_per_issue: 8
 max_changed_files: 20
@@ -525,7 +549,9 @@ high_risk_paths:
 
 挙動:
 
-- 実行を即停止し、ローカルに理由を残す
+- 実行を停止する
+- GitHub 側に active label を付けた後の失敗であれば、補償的に `shinobi:needs-human` へ遷移し理由を Issue に残す
+- GitHub への補償操作まで失敗した場合は、ローカルに理由を残し `status` で operator action が必要だと表示する
 
 ## 観測性
 

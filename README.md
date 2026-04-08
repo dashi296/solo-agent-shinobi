@@ -72,8 +72,9 @@ shinobi init
 shinobi status
 shinobi run
 shinobi run --issue 123
-shinobi watch
 ```
+
+`watch` や phase 分離コマンドは将来候補です。MVP の公開 CLI には含めません。
 
 ## ドキュメント構成
 
