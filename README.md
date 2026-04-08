@@ -77,9 +77,9 @@ shinobi watch
 
 ## ドキュメント構成
 
-- [docs/product-spec.md](/Users/shunokada/projects/solo-agent-shinobi/docs/product-spec.md): プロダクト仕様、ワークフロー、状態遷移、CLI と設定の設計
-- [docs/architecture.md](/Users/shunokada/projects/solo-agent-shinobi/docs/architecture.md): 内部アーキテクチャ、モジュール責務、ローカル state、テスト方針
-- [CLAUDE.md](/Users/shunokada/projects/solo-agent-shinobi/CLAUDE.md): このリポジトリで作業する agent 向けの行動規約
+- [docs/product-spec.md](./docs/product-spec.md): プロダクト仕様、ワークフロー、状態遷移、CLI と設定の設計
+- [docs/architecture.md](./docs/architecture.md): 内部アーキテクチャ、モジュール責務、ローカル state、テスト方針
+- [CLAUDE.md](./CLAUDE.md): このリポジトリで作業する agent 向けの行動規約
 
 ## 現在の状態
 
