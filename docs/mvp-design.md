@@ -79,12 +79,14 @@ shinobi run
 
 - `.shinobi/` ディレクトリを作る
 - `config.yml` の雛形を作る
+- `.shinobi/summary.md` と `.shinobi/decisions.md` の空テンプレートを作る
 - 初回動作に必要な前提を表示する
 
 ### `shinobi status`
 
 - ローカル state を読む
 - GitHub 上の Issue / PR 状態を照合する
+- active mission がなければ直近の mission summary を表示する
 - 不整合があれば warning を出す
 
 ### `shinobi run`
@@ -260,6 +262,14 @@ ready -> working -> reviewing -> merged
   "review_loop_count": 1,
   "last_result": "ci_failed",
   "last_error": null,
+  "last_completed_mission": {
+    "issue_number": 122,
+    "pr_number": 455,
+    "branch": "feature/issue-122-doc-cleanup",
+    "result": "needs-human",
+    "stop_reason": "max_review_loops_exceeded",
+    "finished_at": "2026-04-09T09:30:00+09:00"
+  },
   "updated_at": "2026-04-09T10:00:00+09:00"
 }
 ```
@@ -267,6 +277,7 @@ ready -> working -> reviewing -> merged
 設計方針:
 
 - active mission は 0 か 1 のみ
+- 直近の完了または停止結果を `last_completed_mission` に保持する
 - state は再開補助であり truth ではない
 - GitHub 側と矛盾したら GitHub を優先する
 
@@ -382,6 +393,8 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 - `.shinobi/summary.md`
 - `.shinobi/decisions.md`
 - 対象ファイル候補
+
+初回 run では `init` が生成した空テンプレートを読む前提にします。欠損時は fatal にはせず、空ファイル相当として扱います。
 
 出力:
 
@@ -502,7 +515,7 @@ MVP では大げさな telemetry は入れず、次を残します。
 
 - `.shinobi/logs/<timestamp>.log`
 - GitHub Issue / PR への短い進捗コメント
-- `summary.md` への短い更新
+- `.shinobi/summary.md` への短い更新
 
 重要なのは完全な思考履歴ではなく、再開に必要な要約です。
 
