@@ -403,6 +403,38 @@ class CliTest(unittest.TestCase):
             self.assertIn("run aborted: gh failed", output.getvalue())
             self.assertEqual(StateStore(root).paths.lock_path.read_text(encoding="utf-8"), "")
 
+    def test_run_aborts_cleanly_when_lock_timestamp_is_timezone_naive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    store.paths.lock_path.write_text(
+                        json.dumps(
+                            {
+                                "agent_identity": "other-agent",
+                                "run_id": "live-run",
+                                "pid": 321,
+                                "started_at": "2026-04-09T00:00:00Z",
+                                "heartbeat_at": "2026-04-09T00:00:00",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: failed to load run lock: timestamp must include timezone offset",
+                output.getvalue(),
+            )
+
     def test_run_with_issue_refuses_other_active_github_mission(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -679,6 +711,28 @@ class CliTest(unittest.TestCase):
                     6,
                     active_labels=("shinobi:working", "shinobi:reviewing"),
                 )
+
+    def test_ensure_open_issue_rejects_pull_request(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "api", "repos/owner/repo/issues/6"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 6,
+                    "state": "open",
+                    "labels": [],
+                    "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/6"},
+                }
+            ),
+            stderr="",
+        )
+
+        with patch("shinobi.issue_selector.subprocess.run", return_value=result):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "issue #6 is a pull request, not an issue",
+            ):
+                cli.ensure_open_issue(Path("/tmp/repo"), 6)
 
     def test_list_open_issues_with_any_label_merges_issue_numbers(self) -> None:
         responses = [

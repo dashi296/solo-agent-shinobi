@@ -232,13 +232,12 @@ class StateStore:
             self._lock_file(lock_file)
             try:
                 existing = self._load_lock_from_file(lock_file)
+                if existing is not None and not self.is_lock_stale(existing, config, now):
+                    raise RuntimeError(
+                        f"run lock is held by live run {existing.run_id} ({existing.agent_identity})"
+                    )
             except (JSONDecodeError, TypeError, ValueError) as error:
                 raise ValueError(f"failed to load run lock: {error}") from error
-
-            if existing is not None and not self.is_lock_stale(existing, config, now):
-                raise RuntimeError(
-                    f"run lock is held by live run {existing.run_id} ({existing.agent_identity})"
-                )
 
             took_over_stale_lock = existing is not None
             self._write_lock_to_file(lock_file, lock)
@@ -274,7 +273,10 @@ class StateStore:
     @staticmethod
     def parse_timestamp(value: str) -> datetime:
         normalized = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            raise ValueError("timestamp must include timezone offset")
+        return parsed
 
     @staticmethod
     def format_timestamp(value: datetime) -> str:

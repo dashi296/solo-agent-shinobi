@@ -30,6 +30,9 @@ def select_ready_issue(root: Path, ready_label: str) -> int | None:
 def ensure_open_issue(root: Path, issue_number: int, *, active_labels: Iterable[str] = ()) -> int:
     issue = load_issue(root, issue_number)
 
+    if "pull_request" in issue:
+        raise RuntimeError(f"issue #{issue_number} is a pull request, not an issue")
+
     if str(issue.get("state", "")).upper() != "OPEN":
         raise RuntimeError(f"issue #{issue_number} is not open")
 
