@@ -62,6 +62,10 @@ class WorkspacePaths:
     def cache_dir(self) -> Path:
         return self.shinobi_dir / "cache"
 
+    @property
+    def gitignore_path(self) -> Path:
+        return self.root / ".gitignore"
+
 
 class StateStore:
     def __init__(self, root: Path) -> None:
@@ -111,7 +115,28 @@ class StateStore:
         if not self.paths.lock_path.exists():
             self.paths.lock_path.write_text("", encoding="utf-8")
 
+        self.ensure_shinobi_ignored()
+
         return config, state
+
+    def ensure_shinobi_ignored(self) -> None:
+        if not (self.paths.root / ".git").exists():
+            return
+
+        gitignore_path = self.paths.gitignore_path
+        if gitignore_path.exists():
+            lines = gitignore_path.read_text(encoding="utf-8").splitlines()
+        else:
+            lines = []
+
+        if any(line.strip() in {".shinobi", ".shinobi/"} for line in lines):
+            return
+
+        content = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += ".shinobi/\n"
+        gitignore_path.write_text(content, encoding="utf-8")
 
     def load_state(self) -> State:
         return State.from_dict(json.loads(self.paths.state_path.read_text(encoding="utf-8")))

@@ -274,6 +274,41 @@ class CliTest(unittest.TestCase):
             ).stdout
             self.assertEqual(ignored.strip(), ".shinobi/state.json")
 
+    def test_init_adds_shinobi_directory_to_gitignore_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "https://github.com/owner/repo.git"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            (root / ".gitignore").write_text("dist/\n", encoding="utf-8")
+
+            with patch("pathlib.Path.cwd", return_value=root):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual((root / ".gitignore").read_text(encoding="utf-8"), "dist/\n.shinobi/\n")
+            ignored = subprocess.run(
+                ["git", "check-ignore", ".shinobi/state.json"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertEqual(ignored.strip(), ".shinobi/state.json")
+            status = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertEqual(status.strip(), "?? .gitignore")
+
     def test_packaging_declares_shinobi_package(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             wheel_dir = Path(tmp_dir)
