@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2001,21 +2003,67 @@ class GitHubClientTest(unittest.TestCase):
 
     def test_packaging_declares_shinobi_package(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            wheel_dir = Path(tmp_dir)
+            temp_root = Path(tmp_dir)
             project_root = Path(__file__).resolve().parents[1]
-            with patch("pathlib.Path.cwd", return_value=project_root):
-                with patch.object(sys, "argv", ["pip", "wheel", ".", "--no-deps", "--no-build-isolation", "-w", str(wheel_dir)]):
-                    import pip._internal.cli.main as pip_main
+            packaged_project = temp_root / "repo"
+            wheel_dir = temp_root / "wheel"
+            extract_dir = temp_root / "extract"
+            workspace = temp_root / "workspace"
+            shutil.copytree(
+                project_root,
+                packaged_project,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".pytest_cache"),
+            )
+            wheel_dir.mkdir()
+            workspace.mkdir()
 
-                    exit_code = pip_main.main()
+            original_cwd = Path.cwd()
+            try:
+                with patch("pathlib.Path.cwd", return_value=packaged_project):
+                    with patch.object(
+                        sys,
+                        "argv",
+                        ["pip", "wheel", ".", "--no-deps", "--no-build-isolation", "-w", str(wheel_dir)],
+                    ):
+                        import pip._internal.cli.main as pip_main
+
+                        os.chdir(packaged_project)
+                        exit_code = pip_main.main()
+            finally:
+                os.chdir(original_cwd)
 
             self.assertEqual(exit_code, 0)
             wheel_path = next(wheel_dir.glob("*.whl"))
             with zipfile.ZipFile(wheel_path) as wheel:
                 names = wheel.namelist()
+                wheel.extractall(extract_dir)
 
             self.assertTrue(any(name.startswith("shinobi/") for name in names))
             self.assertTrue(any(name.endswith(".dist-info/entry_points.txt") for name in names))
+
+            check_code = """
+from pathlib import Path
+from unittest.mock import patch
+from shinobi.state_store import StateStore
+
+workspace = Path(r\"\"\"{workspace}\"\"\")
+workspace.mkdir(exist_ok=True)
+with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+    StateStore(workspace).initialize()
+assert (workspace / ".shinobi" / "review-notes.md").exists()
+assert (workspace / ".shinobi" / "templates" / "self-review.md").exists()
+assert (workspace / ".shinobi" / "templates" / "review-note-rule.md").exists()
+""".format(workspace=workspace)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(extract_dir)
+            result = subprocess.run(
+                [sys.executable, "-c", check_code],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_discover_repo_slug_normalizes_ssh_url(self) -> None:
         with patch("subprocess.run", return_value=Mock(stdout="ssh://git@github.com/owner/repo.git\n")):

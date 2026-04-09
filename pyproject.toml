@@ -18,8 +18,9 @@ shinobi = "shinobi.cli:main"
 [tool.setuptools.package-dir]
 "" = "src"
 
-[tool.setuptools]
-packages = ["shinobi"]
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["shinobi*"]
 
 [tool.setuptools.package-data]
-shinobi = ["bootstrap_templates/*.md"]
+"shinobi.bootstrap_templates" = ["*.md"]

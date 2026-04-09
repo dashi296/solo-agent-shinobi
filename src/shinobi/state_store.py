@@ -33,10 +33,66 @@ DECISIONS_TEMPLATE = """# Shinobi Decisions
 """
 
 
+REVIEW_NOTES_TEMPLATE = """# Review Notes
+
+## state-transition
+
+## cleanup-recovery
+
+## test-coverage
+
+## scope-control
+
+## docs-consistency
+"""
+
+
+SELF_REVIEW_TEMPLATE = """# Self Review Checklist
+
+## Goal
+- [ ] 目的を満たしている
+- [ ] 完了条件を yes/no で満たしている
+
+## Scope
+- [ ] スコープ外を混ぜていない
+- [ ] 対象外の大きな変更は follow-up に分離した
+
+## Safety
+- [ ] failure path の cleanup を確認した
+- [ ] state / lock / label の整合性を確認した
+
+## Quality
+- [ ] 正常系を検証した
+- [ ] 失敗系を検証した
+- [ ] lint / typecheck / test の実行結果を確認した
+
+## Docs
+- [ ] README / docs との不整合がない
+- [ ] 必要なドキュメント更新を含めた
+"""
+
+
+REVIEW_NOTE_RULE_TEMPLATE = """# Review Note Rule Template
+
+- category:
+- rule:
+- trigger:
+- check:
+- promote_if_repeated:
+"""
+
+
 BOOTSTRAP_TEMPLATE_FILES = {
     "review-notes.md": "review-notes.md",
     "self-review.md": "templates/self-review.md",
     "review-note-rule.md": "templates/review-note-rule.md",
+}
+
+
+BOOTSTRAP_TEMPLATE_CONTENTS = {
+    "review-notes.md": REVIEW_NOTES_TEMPLATE,
+    "self-review.md": SELF_REVIEW_TEMPLATE,
+    "review-note-rule.md": REVIEW_NOTE_RULE_TEMPLATE,
 }
 
 
@@ -157,11 +213,16 @@ class StateStore:
             if target_path.exists():
                 continue
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            source_path = self.bootstrap_templates_dir() / source_name
-            target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+            target_path.write_text(self.read_bootstrap_template(source_name), encoding="utf-8")
 
     def bootstrap_templates_dir(self) -> Path:
         return Path(__file__).resolve().parent / "bootstrap_templates"
+
+    def read_bootstrap_template(self, source_name: str) -> str:
+        source_path = self.bootstrap_templates_dir() / source_name
+        if source_path.exists():
+            return source_path.read_text(encoding="utf-8")
+        return BOOTSTRAP_TEMPLATE_CONTENTS[source_name]
 
     def ensure_shinobi_ignored(self) -> None:
         exclude_path = self.resolve_git_info_exclude_path()
