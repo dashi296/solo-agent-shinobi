@@ -27,7 +27,13 @@ def select_ready_issue(root: Path, ready_label: str) -> int | None:
     return int(ranked_issues[0]["number"])
 
 
-def ensure_open_issue(root: Path, issue_number: int, *, active_labels: Iterable[str] = ()) -> int:
+def ensure_open_issue(
+    root: Path,
+    issue_number: int,
+    *,
+    active_labels: Iterable[str] = (),
+    allow_active_labels: bool = False,
+) -> int:
     issue = load_issue(root, issue_number)
 
     if "pull_request" in issue:
@@ -42,7 +48,7 @@ def ensure_open_issue(root: Path, issue_number: int, *, active_labels: Iterable[
         if isinstance(label, dict)
     }
     conflicting_labels = sorted(label for label in active_labels if label in label_names)
-    if conflicting_labels:
+    if conflicting_labels and not allow_active_labels:
         joined = ", ".join(conflicting_labels)
         raise RuntimeError(
             f"issue #{issue_number} already has active mission label(s): {joined}"
