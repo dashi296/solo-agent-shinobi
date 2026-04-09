@@ -66,6 +66,14 @@ class WorkspacePaths:
     def gitignore_path(self) -> Path:
         return self.root / ".gitignore"
 
+    @property
+    def git_dir(self) -> Path:
+        return self.root / ".git"
+
+    @property
+    def git_info_exclude_path(self) -> Path:
+        return self.git_dir / "info" / "exclude"
+
 
 class StateStore:
     def __init__(self, root: Path) -> None:
@@ -120,23 +128,20 @@ class StateStore:
         return config, state
 
     def ensure_shinobi_ignored(self) -> None:
-        if not (self.paths.root / ".git").exists():
+        if not self.paths.git_dir.exists():
             return
 
-        gitignore_path = self.paths.gitignore_path
-        if gitignore_path.exists():
-            lines = gitignore_path.read_text(encoding="utf-8").splitlines()
-        else:
-            lines = []
+        exclude_path = self.paths.git_info_exclude_path
+        lines = exclude_path.read_text(encoding="utf-8").splitlines() if exclude_path.exists() else []
 
         if any(line.strip() in {".shinobi", ".shinobi/"} for line in lines):
             return
 
-        content = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+        content = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
         if content and not content.endswith("\n"):
             content += "\n"
         content += ".shinobi/\n"
-        gitignore_path.write_text(content, encoding="utf-8")
+        exclude_path.write_text(content, encoding="utf-8")
 
     def load_state(self) -> State:
         return State.from_dict(json.loads(self.paths.state_path.read_text(encoding="utf-8")))

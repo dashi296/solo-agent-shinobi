@@ -35,12 +35,16 @@ def discover_repo_slug(cwd: Path) -> str:
     remote = result.stdout.strip()
     if not remote:
         return "unknown/unknown"
-    if remote.startswith("git@github.com:"):
-        return remote.removeprefix("git@github.com:").removesuffix(".git")
+    if remote.startswith("git@"):
+        _, _, path = remote.partition(":")
+        if path:
+            return path.removesuffix(".git").lstrip("/")
     parsed = urlparse(remote)
-    if parsed.scheme and parsed.path and parsed.hostname == "github.com":
-        return parsed.path.lstrip("/").removesuffix(".git")
-    return remote.removesuffix(".git")
+    if parsed.path:
+        normalized = parsed.path.lstrip("/").removesuffix(".git")
+        if normalized:
+            return normalized
+    return "unknown/unknown"
 
 
 def build_agent_identity(repo: str) -> str:

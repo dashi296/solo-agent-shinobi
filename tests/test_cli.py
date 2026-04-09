@@ -258,7 +258,8 @@ class CliTest(unittest.TestCase):
                 check=True,
                 capture_output=True,
             )
-            (root / ".gitignore").write_text(".shinobi/\n", encoding="utf-8")
+            exclude_path = root / ".git" / "info" / "exclude"
+            exclude_path.write_text(".shinobi/\n", encoding="utf-8")
 
             with patch("pathlib.Path.cwd", return_value=root):
                 with redirect_stdout(io.StringIO()):
@@ -274,7 +275,7 @@ class CliTest(unittest.TestCase):
             ).stdout
             self.assertEqual(ignored.strip(), ".shinobi/state.json")
 
-    def test_init_adds_shinobi_directory_to_gitignore_when_missing(self) -> None:
+    def test_init_adds_shinobi_directory_to_git_info_exclude_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
@@ -285,13 +286,19 @@ class CliTest(unittest.TestCase):
                 capture_output=True,
             )
             (root / ".gitignore").write_text("dist/\n", encoding="utf-8")
+            exclude_path = root / ".git" / "info" / "exclude"
+            original_exclude = exclude_path.read_text(encoding="utf-8")
 
             with patch("pathlib.Path.cwd", return_value=root):
                 with redirect_stdout(io.StringIO()):
                     exit_code = cli.main(["init"])
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual((root / ".gitignore").read_text(encoding="utf-8"), "dist/\n.shinobi/\n")
+            self.assertEqual((root / ".gitignore").read_text(encoding="utf-8"), "dist/\n")
+            self.assertEqual(
+                exclude_path.read_text(encoding="utf-8"),
+                original_exclude + ("" if original_exclude.endswith("\n") or not original_exclude else "\n") + ".shinobi/\n",
+            )
             ignored = subprocess.run(
                 ["git", "check-ignore", ".shinobi/state.json"],
                 cwd=root,
@@ -335,6 +342,13 @@ class CliTest(unittest.TestCase):
 
     def test_discover_repo_slug_strips_https_credentials(self) -> None:
         remote = "https://x-access-token:ghp_secret@github.com/owner/repo.git\n"
+        with patch("subprocess.run", return_value=Mock(stdout=remote)):
+            repo = discover_repo_slug(Path("."))
+
+        self.assertEqual(repo, "owner/repo")
+
+    def test_discover_repo_slug_strips_credentials_from_non_github_host(self) -> None:
+        remote = "https://token@example.com/owner/repo.git\n"
         with patch("subprocess.run", return_value=Mock(stdout=remote)):
             repo = discover_repo_slug(Path("."))
 
