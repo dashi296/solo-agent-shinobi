@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from setuptools import setup
+from setuptools import find_packages, setup
 
 
 setup(
@@ -12,6 +12,11 @@ setup(
     author="solo-agent-shinobi maintainers",
     python_requires=">=3.9",
     package_dir={"": "src"},
-    packages=["shinobi"],
+    packages=find_packages("src"),
+    include_package_data=True,
+    package_data={
+        "shinobi": ["bootstrap_templates/*.md"],
+        "shinobi.bootstrap_templates": ["*.md"],
+    },
     entry_points={"console_scripts": ["shinobi=shinobi.cli:main"]},
 )

@@ -2040,6 +2040,9 @@ class GitHubClientTest(unittest.TestCase):
 
             self.assertTrue(any(name.startswith("shinobi/") for name in names))
             self.assertTrue(any(name.endswith(".dist-info/entry_points.txt") for name in names))
+            self.assertIn("shinobi/bootstrap_templates/review-notes.md", names)
+            self.assertIn("shinobi/bootstrap_templates/self-review.md", names)
+            self.assertIn("shinobi/bootstrap_templates/review-note-rule.md", names)
 
             check_code = """
 from pathlib import Path
