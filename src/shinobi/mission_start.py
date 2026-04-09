@@ -72,8 +72,12 @@ def start_mission(
         sync_start_labels(root, issue_number, config)
     except MissionStartError as error:
         provisional_state.last_error = str(error)
-        store.save_state(provisional_state)
-        raise
+        save_retryable_state_or_raise(
+            store=store,
+            state=provisional_state,
+            base_message=str(error),
+        )
+        raise error
 
     lease_expires_at = store.format_timestamp(
         started_at + timedelta(minutes=config.mission_lease_minutes)
@@ -109,10 +113,15 @@ def start_mission(
         )
         if rollback_error is not None:
             provisional_state.last_error += f"; rollback also failed: {rollback_error}"
-        store.save_state(provisional_state)
-        raise MissionStartError(
-            format_final_state_persistence_failure(issue_number, error, rollback_error)
-        ) from error
+        failure_message = format_final_state_persistence_failure(
+            issue_number, error, rollback_error
+        )
+        save_retryable_state_or_raise(
+            store=store,
+            state=provisional_state,
+            base_message=failure_message,
+        )
+        raise MissionStartError(failure_message) from error
 
     return StartedMission(
         issue_number=issue_number,
@@ -218,10 +227,12 @@ def transition_issue_to_needs_human(
 ) -> str | None:
     client = GitHubClient(root, repo=config.repo)
     working_label = config.labels["working"]
+    ready_label = config.labels["ready"]
     needs_human_label = config.labels["needs_human"]
 
     try:
         client.update_issue_labels(issue_number, add=[needs_human_label])
+        client.update_issue_labels(issue_number, remove=[ready_label])
         client.update_issue_labels(issue_number, remove=[working_label])
         client.create_issue_comment(issue_number, reason)
     except GitHubClientError as error:
@@ -241,6 +252,21 @@ def format_final_state_persistence_failure(
     if rollback_error is not None:
         message += f"; rollback also failed: {rollback_error}"
     return message
+
+
+def save_retryable_state_or_raise(
+    *,
+    store: StateStore,
+    state: State,
+    base_message: str,
+) -> None:
+    try:
+        store.save_state(state)
+    except OSError as error:
+        raise MissionStartError(
+            f"{base_message}; additionally failed to persist retryable local state: {error}"
+        ) from error
+
 
 def persist_retryable_start_failure(
     *,

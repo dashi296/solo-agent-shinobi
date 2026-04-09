@@ -1088,6 +1088,7 @@ class MissionStartTest(unittest.TestCase):
                         GitHubClientError("remove failed"),
                         None,
                         None,
+                        None,
                     ]
                     with self.assertRaisesRegex(
                         MissionStartError,
@@ -1119,6 +1120,7 @@ class MissionStartTest(unittest.TestCase):
                     unittest.mock.call(26, add=["shinobi:working"]),
                     unittest.mock.call(26, remove=["shinobi:ready"]),
                     unittest.mock.call(26, add=["shinobi:needs-human"]),
+                    unittest.mock.call(26, remove=["shinobi:ready"]),
                     unittest.mock.call(26, remove=["shinobi:working"]),
                 ],
             )
@@ -1195,6 +1197,7 @@ class MissionStartTest(unittest.TestCase):
                     unittest.mock.call(26, add=["shinobi:working"]),
                     unittest.mock.call(26, remove=["shinobi:ready"]),
                     unittest.mock.call(26, add=["shinobi:needs-human"]),
+                    unittest.mock.call(26, remove=["shinobi:ready"]),
                     unittest.mock.call(26, remove=["shinobi:working"]),
                 ],
             )
@@ -1202,6 +1205,81 @@ class MissionStartTest(unittest.TestCase):
             self.assertIn(
                 "failed to persist final local state during start phase",
                 client.create_issue_comment.call_args.args[1],
+            )
+
+    def test_start_mission_surfaces_retryable_state_persist_failure_after_label_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+            store = StateStore(root)
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            run_id = "run-123"
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(
+                config=config,
+                run_id=run_id,
+                pid=123,
+                now=now,
+            )
+
+            with patch(
+                "shinobi.mission_start.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["git", "checkout", "-b", "feature/issue-26-task-run-start-phase"],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+            ):
+                real_save_state = store.save_state
+
+                def failing_save_state(state):
+                    if state.last_error and "failed to remove shinobi:ready" in state.last_error:
+                        raise OSError("state write failed twice")
+                    real_save_state(state)
+
+                with patch("shinobi.mission_start.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.update_issue_labels.side_effect = [
+                        None,
+                        GitHubClientError("remove failed"),
+                        None,
+                        None,
+                        None,
+                    ]
+                    with patch.object(store, "save_state", side_effect=failing_save_state):
+                        with self.assertRaisesRegex(
+                            MissionStartError,
+                            "additionally failed to persist retryable local state: state write failed twice",
+                        ):
+                            start_mission(
+                                root=root,
+                                store=store,
+                                config=config,
+                                run_id=run_id,
+                                issue={
+                                    "number": 26,
+                                    "title": "[TASK] run start phase を実装する",
+                                    "labels": [{"name": "shinobi:ready"}],
+                                    "state": "open",
+                                },
+                                now=now,
+                            )
+
+            self.assertEqual(
+                client.update_issue_labels.call_args_list,
+                [
+                    unittest.mock.call(26, add=["shinobi:working"]),
+                    unittest.mock.call(26, remove=["shinobi:ready"]),
+                    unittest.mock.call(26, add=["shinobi:needs-human"]),
+                    unittest.mock.call(26, remove=["shinobi:ready"]),
+                    unittest.mock.call(26, remove=["shinobi:working"]),
+                ],
             )
 
     def test_start_mission_writes_retryable_log_when_provisional_state_save_fails(self) -> None:
