@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import subprocess
 from dataclasses import dataclass
@@ -8,6 +7,11 @@ from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Tuple
+
+try:
+    import fcntl
+except ModuleNotFoundError:
+    fcntl = None
 
 from .config import default_config, load_config, save_config
 from .models import Config, RunLock, State
@@ -250,6 +254,8 @@ class StateStore:
 
     @staticmethod
     def _lock_file(lock_file) -> None:
+        if fcntl is None:
+            raise RuntimeError("run locking is not supported on this platform")
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
 
     @staticmethod

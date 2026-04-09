@@ -293,6 +293,25 @@ class CliTest(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             self.assertIn("Run `shinobi init` first.", output.getvalue())
 
+    def test_run_reports_platform_without_run_lock_support(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    output = io.StringIO()
+                    with patch("shinobi.state_store.fcntl", None):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: run locking is not supported on this platform",
+                output.getvalue(),
+            )
+
     def test_run_refuses_live_lock_owned_by_another_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
