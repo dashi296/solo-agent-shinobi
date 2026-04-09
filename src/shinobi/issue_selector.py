@@ -58,17 +58,20 @@ def ensure_open_issue(
 
 
 def load_issue(root: Path, issue_number: int) -> dict:
-    result = subprocess.run(
-        [
-            "gh",
-            "api",
-            f"repos/{discover_repo_slug(root)}/issues/{issue_number}",
-        ],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{discover_repo_slug(root)}/issues/{issue_number}",
+            ],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise RuntimeError(f"failed to load issue #{issue_number} with gh: {error}") from error
     if result.returncode != 0:
         stderr = result.stderr.strip()
         raise RuntimeError(stderr or f"failed to load issue #{issue_number} with gh")
@@ -94,27 +97,32 @@ def list_open_issues(root: Path, label: str) -> list[dict]:
     issues: list[dict] = []
 
     while True:
-        result = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{repo}/issues",
-                "--method",
-                "GET",
-                "-f",
-                "state=open",
-                "-f",
-                f"labels={label}",
-                "-f",
-                f"per_page={ISSUES_PER_PAGE}",
-                "-f",
-                f"page={page}",
-            ],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"repos/{repo}/issues",
+                    "--method",
+                    "GET",
+                    "-f",
+                    "state=open",
+                    "-f",
+                    f"labels={label}",
+                    "-f",
+                    f"per_page={ISSUES_PER_PAGE}",
+                    "-f",
+                    f"page={page}",
+                ],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as error:
+            raise RuntimeError(
+                f"failed to list open issues for label {label}: {error}"
+            ) from error
         if result.returncode != 0:
             stderr = result.stderr.strip()
             raise RuntimeError(stderr or f"failed to list open issues for label {label}")
