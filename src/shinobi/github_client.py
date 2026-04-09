@@ -81,24 +81,31 @@ class GitHubClient:
             action=f"create comment on issue #{issue_number}",
         )
 
-    def list_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
-        payload = self._run_gh_json(
-            ["issue", "view", str(issue_number), "--json", "comments"],
-            action=f"list comments on issue #{issue_number}",
-        )
-        if not isinstance(payload, dict):
-            raise GitHubClientError(
-                f"failed to parse comments for issue #{issue_number}: expected object payload"
-            )
+    def list_issue_comments(self, issue_number: int, *, per_page: int = 100) -> list[dict[str, Any]]:
+        page = 1
+        comments: list[dict[str, Any]] = []
 
-        comments = payload.get("comments")
-        if not isinstance(comments, list):
-            raise GitHubClientError(
-                f"failed to parse comments for issue #{issue_number}: expected comments list"
+        while True:
+            payload = self._api_json(
+                ["repos/{repo}/issues/{issue_number}/comments", "--method", "GET"],
+                action=f"list comments on issue #{issue_number}",
+                fields={
+                    "per_page": str(per_page),
+                    "page": str(page),
+                },
+                issue_number=issue_number,
             )
-        return [comment for comment in comments if isinstance(comment, dict)]
+            if not isinstance(payload, list):
+                raise GitHubClientError(
+                    f"failed to parse comments for issue #{issue_number}: expected list payload"
+                )
 
-    def update_issue_comment(self, comment_id: str, body: str) -> None:
+            comments.extend(comment for comment in payload if isinstance(comment, dict))
+            if len(payload) < per_page:
+                return comments
+            page += 1
+
+    def update_issue_comment(self, comment_id: int, body: str) -> None:
         self._api(
             ["repos/{repo}/issues/comments/{comment_id}", "--method", "PATCH"],
             action=f"update comment {comment_id}",

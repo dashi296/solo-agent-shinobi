@@ -1031,15 +1031,13 @@ class GitHubClientTest(unittest.TestCase):
 
     def test_list_issue_comments_reads_comments_from_issue_view(self) -> None:
         response = subprocess.CompletedProcess(
-            args=["gh", "issue", "view", "6"],
+            args=["gh", "api", "repos/owner/repo/issues/6/comments"],
             returncode=0,
             stdout=json.dumps(
-                {
-                    "comments": [
-                        {"id": "IC_kwDO", "body": "first"},
-                        {"id": "IC_kwDP", "body": "second"},
-                    ]
-                }
+                [
+                    {"id": 101, "body": "first"},
+                    {"id": 102, "body": "second"},
+                ]
             ),
             stderr="",
         )
@@ -1050,12 +1048,47 @@ class GitHubClientTest(unittest.TestCase):
                 comments = client.list_issue_comments(6)
 
         command = run_mock.call_args.args[0]
-        self.assertEqual(command[:6], ["gh", "issue", "view", "6", "--json", "comments"])
-        self.assertEqual([comment["id"] for comment in comments], ["IC_kwDO", "IC_kwDP"])
+        self.assertEqual(
+            command[:5],
+            ["gh", "api", "repos/owner/repo/issues/6/comments", "--method", "GET"],
+        )
+        self.assertIn("per_page=100", command)
+        self.assertIn("page=1", command)
+        self.assertEqual([comment["id"] for comment in comments], [101, 102])
 
-    def test_list_issue_comments_rejects_non_list_comments_payload(self) -> None:
+    def test_list_issue_comments_paginates_past_first_page(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["gh", "api", "repos/owner/repo/issues/6/comments"],
+                returncode=0,
+                stdout=json.dumps([{"id": number} for number in range(1, 101)]),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["gh", "api", "repos/owner/repo/issues/6/comments"],
+                returncode=0,
+                stdout=json.dumps([{"id": 150}]),
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                comments = client.list_issue_comments(6)
+
+        self.assertEqual(run_mock.call_count, 2)
+        first_command = run_mock.call_args_list[0].args[0]
+        second_command = run_mock.call_args_list[1].args[0]
+        self.assertIn("page=1", first_command)
+        self.assertIn("page=2", second_command)
+        self.assertEqual(comments[0]["id"], 1)
+        self.assertEqual(comments[-1]["id"], 150)
+        self.assertEqual(len(comments), 101)
+
+    def test_list_issue_comments_rejects_non_list_payload(self) -> None:
         response = subprocess.CompletedProcess(
-            args=["gh", "issue", "view", "6"],
+            args=["gh", "api", "repos/owner/repo/issues/6/comments"],
             returncode=0,
             stdout=json.dumps({"comments": "broken"}),
             stderr="",
@@ -1066,7 +1099,7 @@ class GitHubClientTest(unittest.TestCase):
                 client = GitHubClient(Path("/tmp/repo"))
                 with self.assertRaisesRegex(
                     GitHubClientError,
-                    "failed to parse comments for issue #6: expected comments list",
+                    "failed to parse comments for issue #6: expected list payload",
                 ):
                     client.list_issue_comments(6)
 
@@ -1081,7 +1114,7 @@ class GitHubClientTest(unittest.TestCase):
         with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
             with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
                 client = GitHubClient(Path("/tmp/repo"))
-                client.update_issue_comment("123", "mission updated")
+                client.update_issue_comment(123, "mission updated")
 
         command = run_mock.call_args.args[0]
         self.assertEqual(
