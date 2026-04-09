@@ -33,6 +33,13 @@ DECISIONS_TEMPLATE = """# Shinobi Decisions
 """
 
 
+BOOTSTRAP_TEMPLATE_FILES = {
+    "review-notes.md": "review-notes.md",
+    "self-review.md": "templates/self-review.md",
+    "review-note-rule.md": "templates/review-note-rule.md",
+}
+
+
 @dataclass
 class WorkspacePaths:
     root: Path
@@ -60,6 +67,22 @@ class WorkspacePaths:
     @property
     def lock_path(self) -> Path:
         return self.shinobi_dir / "run.lock"
+
+    @property
+    def review_notes_path(self) -> Path:
+        return self.shinobi_dir / "review-notes.md"
+
+    @property
+    def templates_dir(self) -> Path:
+        return self.shinobi_dir / "templates"
+
+    @property
+    def self_review_template_path(self) -> Path:
+        return self.templates_dir / "self-review.md"
+
+    @property
+    def review_note_rule_template_path(self) -> Path:
+        return self.templates_dir / "review-note-rule.md"
 
     @property
     def logs_dir(self) -> Path:
@@ -121,10 +144,24 @@ class StateStore:
             self.paths.decisions_path.write_text(DECISIONS_TEMPLATE, encoding="utf-8")
         if not self.paths.lock_path.exists():
             self.paths.lock_path.write_text("", encoding="utf-8")
+        self.initialize_workspace_templates()
 
         self.ensure_shinobi_ignored()
 
         return config, state
+
+    def initialize_workspace_templates(self) -> None:
+        self.paths.templates_dir.mkdir(exist_ok=True)
+        for source_name, relative_target in BOOTSTRAP_TEMPLATE_FILES.items():
+            target_path = self.paths.shinobi_dir / relative_target
+            if target_path.exists():
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path = self.bootstrap_templates_dir() / source_name
+            target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    def bootstrap_templates_dir(self) -> Path:
+        return Path(__file__).resolve().parent / "bootstrap_templates"
 
     def ensure_shinobi_ignored(self) -> None:
         exclude_path = self.resolve_git_info_exclude_path()

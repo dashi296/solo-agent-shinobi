@@ -85,7 +85,13 @@ shinobi run --issue 123
 - workspace / installation ごとに一意な `agent_identity` を生成して `.shinobi/config.json` へ書き込む
 - `.shinobi/summary.md` と `.shinobi/decisions.md` の空テンプレートを作る
 - `.shinobi/run.lock` を初期化可能な状態にする
+- `.shinobi/review-notes.md` の初期テンプレートを作る
+- `.shinobi/templates/self-review.md` を作る
+- `.shinobi/templates/review-note-rule.md` を作る
 - 初回動作に必要な前提を表示する
+
+既存の `review-notes.md` や `templates/` 配下ファイルがある場合、`init` は原則として上書きしません。
+テンプレート本体は追跡対象の配布元に置き、`init` はそれらを `.shinobi/` 配下へコピーします。
 
 ### `shinobi status`
 
@@ -193,12 +199,14 @@ fatal 時の補償動作:
 - Issue 本文とチェックリストを抽出する
 - 変更対象ファイル候補を最小限推定する
 - `.shinobi/summary.md` と `.shinobi/decisions.md` を読む
+- `.shinobi/review-notes.md` から今回の task に関連するカテゴリだけを読む
 - エージェントへ渡す実行コンテキストを構築する
 
 設計原則:
 
 - repo 全体を読まない
 - Issue に無い要件は原則追加しない
+- `.shinobi/review-notes.md` 全文は読まず、関連カテゴリが不明確でも最大 2 カテゴリまでに抑える
 - 不明点は conservative に扱う
 
 ### Phase 4: execute
@@ -213,6 +221,7 @@ fatal 時の補償動作:
 - execute 中は `mission_heartbeat_interval_minutes` ごとに定期 heartbeat を更新する
 - 長時間処理に入る前と各 retry 後にも即時 heartbeat を更新する
 - lint / typecheck / test を実行する
+- publish 前に `.shinobi/templates/self-review.md` に沿ってセルフレビューを行う
 - 必要なら修正を繰り返す
 - 変更要約を生成する
 
@@ -473,10 +482,15 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 - Issue コメントのうち marker 付きの shinobi 関連ログ
 - `.shinobi/summary.md`
 - `.shinobi/decisions.md`
+- `.shinobi/review-notes.md` の関連カテゴリ
+- `.shinobi/templates/self-review.md`
+- `.shinobi/templates/review-note-rule.md`
 - `.shinobi/run.lock`
 - 対象ファイル候補
 
-初回 run では `init` が生成した空テンプレートを読む前提にします。欠損時は fatal にはせず、空ファイル相当として扱います。
+`review-notes.md` は全文読込ではなく、task に関連するカテゴリだけを入力に含めます。関連カテゴリが不明確な場合でも最大 2 カテゴリまでに制限します。
+
+初回 run では `init` が配布元テンプレートから生成した workspace 内テンプレートを読む前提にします。欠損時は fatal にはせず、空ファイル相当として扱います。
 
 Shinobi 関連ログは自由文検索ではなく、HTML comment marker の中に固定 schema の key-value block を持つ machine-readable comment を前提にします。最低でも `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `agent_identity`, `run_id` を含めます。recovery は自由文本文ではなく marker 内 block だけを parse 対象にします。`agent_identity` は `init` が生成する workspace / installation ごとの一意 ID で、複数 runner 間で共有しません。
 

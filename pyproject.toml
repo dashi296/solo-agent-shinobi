@@ -20,3 +20,6 @@ shinobi = "shinobi.cli:main"
 
 [tool.setuptools]
 packages = ["shinobi"]
+
+[tool.setuptools.package-data]
+shinobi = ["bootstrap_templates/*.md"]

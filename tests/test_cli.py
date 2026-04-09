@@ -43,8 +43,43 @@ class CliTest(unittest.TestCase):
             self.assertTrue(store.paths.state_path.exists())
             self.assertTrue(store.paths.summary_path.exists())
             self.assertTrue(store.paths.decisions_path.exists())
+            self.assertTrue(store.paths.review_notes_path.exists())
+            self.assertTrue(store.paths.self_review_template_path.exists())
+            self.assertTrue(store.paths.review_note_rule_template_path.exists())
             self.assertTrue(store.paths.lock_path.exists())
             self.assertIn("Initialized Shinobi", output.getvalue())
+
+    def test_init_does_not_overwrite_existing_workspace_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.templates_dir.mkdir()
+            store.paths.review_notes_path.write_text("# custom notes\n", encoding="utf-8")
+            store.paths.self_review_template_path.write_text("# custom self review\n", encoding="utf-8")
+            store.paths.review_note_rule_template_path.write_text(
+                "# custom review rule\n",
+                encoding="utf-8",
+            )
+
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                store.paths.review_notes_path.read_text(encoding="utf-8"),
+                "# custom notes\n",
+            )
+            self.assertEqual(
+                store.paths.self_review_template_path.read_text(encoding="utf-8"),
+                "# custom self review\n",
+            )
+            self.assertEqual(
+                store.paths.review_note_rule_template_path.read_text(encoding="utf-8"),
+                "# custom review rule\n",
+            )
 
     def test_status_requires_init(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
