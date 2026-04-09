@@ -145,18 +145,16 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
 
 def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int]) -> str | None:
     if state.retryable_local_only and state.issue_number is not None:
-        if requested_issue is None or requested_issue != state.issue_number:
-            return (
-                "retryable local-only mission exists for "
-                f"issue #{state.issue_number}; resume/cancel logic is not implemented yet"
-            )
+        return (
+            "retryable local-only mission exists for "
+            f"issue #{state.issue_number}; resume/cancel logic is not implemented yet"
+        )
 
     if state.phase != "idle" and state.issue_number is not None:
-        if requested_issue is None or requested_issue != state.issue_number:
-            return (
-                f"local mission state is active for issue #{state.issue_number} "
-                f"(phase: {state.phase})"
-            )
+        return (
+            f"local mission state is active for issue #{state.issue_number} "
+            f"(phase: {state.phase}); resume logic is not implemented yet"
+        )
 
     return None
 

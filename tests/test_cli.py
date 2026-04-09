@@ -10,6 +10,7 @@ import zipfile
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier, Thread
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -405,10 +406,83 @@ class CliTest(unittest.TestCase):
                         with redirect_stdout(output):
                             exit_code = cli.main(["run", "--issue", "6"])
 
-            self.assertEqual(exit_code, 0)
-            self.assertIn("selected_issue: 6", output.getvalue())
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: retryable local-only mission exists for issue #6",
+                output.getvalue(),
+            )
             select_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_with_issue_refuses_active_local_state_for_same_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    state = store.load_state()
+                    state.issue_number = 6
+                    state.phase = "start"
+                    store.save_state(state)
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.select_ready_issue") as select_mock:
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["run", "--issue", "6"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: local mission state is active for issue #6",
+                output.getvalue(),
+            )
+            select_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_acquire_lock_is_atomic_across_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+
+            config_payload = {"repo": "owner/repo", "agent_identity": "config-id"}
+            store.paths.config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "config-id", "phase": "idle"}),
+                encoding="utf-8",
+            )
+
+            barrier = Barrier(2)
+            now = datetime.now(timezone.utc)
+            results: list[tuple[str, str]] = []
+
+            def acquire(run_id: str) -> None:
+                barrier.wait()
+                try:
+                    store.acquire_lock(
+                        config=store.try_load_config()[0],
+                        run_id=run_id,
+                        pid=123,
+                        now=now,
+                    )
+                except RuntimeError as error:
+                    results.append(("error", str(error)))
+                else:
+                    results.append(("ok", run_id))
+
+            first = Thread(target=acquire, args=("run-a",))
+            second = Thread(target=acquire, args=("run-b",))
+            first.start()
+            second.start()
+            first.join()
+            second.join()
+
+            self.assertEqual(len(results), 2)
+            self.assertEqual(sum(1 for status, _ in results if status == "ok"), 1)
+            self.assertEqual(sum(1 for status, _ in results if status == "error"), 1)
+            self.assertIn("run lock is held by live run", next(message for status, message in results if status == "error"))
 
     def test_init_uses_git_workspace_root_from_subdirectory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

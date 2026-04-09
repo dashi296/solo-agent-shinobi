@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
 from dataclasses import dataclass
@@ -201,10 +202,13 @@ class StateStore:
         )
 
     def clear_lock(self, run_id: str) -> None:
-        lock, _ = self.try_load_lock()
-        if lock is None or lock.run_id != run_id:
-            return
-        self.paths.lock_path.write_text("", encoding="utf-8")
+        self.paths.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.paths.lock_path.open("a+", encoding="utf-8") as lock_file:
+            self._lock_file(lock_file)
+            lock = self._load_lock_from_file(lock_file)
+            if lock is None or lock.run_id != run_id:
+                return
+            self._write_lock_to_file(lock_file, None)
 
     def acquire_lock(
         self,
@@ -214,15 +218,6 @@ class StateStore:
         pid: int,
         now: datetime,
     ) -> Tuple[RunLock, bool]:
-        existing, error = self.try_load_lock()
-        if error is not None:
-            raise ValueError(f"failed to load run lock: {error}")
-
-        if existing is not None and not self.is_lock_stale(existing, config, now):
-            raise RuntimeError(
-                f"run lock is held by live run {existing.run_id} ({existing.agent_identity})"
-            )
-
         timestamp = self.format_timestamp(now)
         lock = RunLock(
             agent_identity=config.agent_identity,
@@ -231,14 +226,50 @@ class StateStore:
             started_at=timestamp,
             heartbeat_at=timestamp,
         )
-        took_over_stale_lock = existing is not None
-        self.save_lock(lock)
-        return lock, took_over_stale_lock
+        self.paths.lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with self.paths.lock_path.open("a+", encoding="utf-8") as lock_file:
+            self._lock_file(lock_file)
+            try:
+                existing = self._load_lock_from_file(lock_file)
+            except (JSONDecodeError, TypeError, ValueError) as error:
+                raise ValueError(f"failed to load run lock: {error}") from error
+
+            if existing is not None and not self.is_lock_stale(existing, config, now):
+                raise RuntimeError(
+                    f"run lock is held by live run {existing.run_id} ({existing.agent_identity})"
+                )
+
+            took_over_stale_lock = existing is not None
+            self._write_lock_to_file(lock_file, lock)
+            return lock, took_over_stale_lock
 
     def is_lock_stale(self, lock: RunLock, config: Config, now: datetime) -> bool:
         heartbeat_at = self.parse_timestamp(lock.heartbeat_at)
         lease_deadline = heartbeat_at + timedelta(minutes=config.mission_lease_minutes)
         return now > lease_deadline
+
+    @staticmethod
+    def _lock_file(lock_file) -> None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _load_lock_from_file(lock_file) -> RunLock | None:
+        lock_file.seek(0)
+        content = lock_file.read().strip()
+        if not content:
+            return None
+        return RunLock.from_dict(json.loads(content))
+
+    @staticmethod
+    def _write_lock_to_file(lock_file, lock: RunLock | None) -> None:
+        content = ""
+        if lock is not None:
+            content = json.dumps(lock.to_dict(), indent=2) + "\n"
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(content)
+        lock_file.flush()
 
     @staticmethod
     def parse_timestamp(value: str) -> datetime:
