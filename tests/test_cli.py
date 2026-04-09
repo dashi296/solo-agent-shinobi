@@ -403,16 +403,37 @@ class CliTest(unittest.TestCase):
 
                     output = io.StringIO()
                     with patch("shinobi.cli.select_ready_issue") as select_mock:
+                        with patch("shinobi.cli.ensure_open_issue", return_value=6) as issue_mock:
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["run", "--issue", "6"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("selected_issue: 6", output.getvalue())
+            select_mock.assert_not_called()
+            issue_mock.assert_called_once_with(root, 6)
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_with_issue_refuses_closed_or_missing_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    output = io.StringIO()
+                    with patch(
+                        "shinobi.cli.ensure_open_issue",
+                        side_effect=RuntimeError("issue #6 is not open"),
+                    ):
                         with redirect_stdout(output):
                             exit_code = cli.main(["run", "--issue", "6"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
-                "run aborted: retryable local-only mission exists for issue #6",
+                "run aborted: issue #6 is not open",
                 output.getvalue(),
             )
-            select_mock.assert_not_called()
-            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_with_issue_refuses_active_local_state_for_same_issue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -430,16 +451,48 @@ class CliTest(unittest.TestCase):
 
                     output = io.StringIO()
                     with patch("shinobi.cli.select_ready_issue") as select_mock:
-                        with redirect_stdout(output):
-                            exit_code = cli.main(["run", "--issue", "6"])
+                        with patch("shinobi.cli.ensure_open_issue", return_value=6) as issue_mock:
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["run", "--issue", "6"])
 
-            self.assertEqual(exit_code, 1)
-            self.assertIn(
-                "run aborted: local mission state is active for issue #6",
-                output.getvalue(),
-            )
+            self.assertEqual(exit_code, 0)
+            self.assertIn("selected_issue: 6", output.getvalue())
             select_mock.assert_not_called()
+            issue_mock.assert_called_once_with(root, 6)
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_select_ready_issue_prefers_high_priority_labels(self) -> None:
+        issue_list = json.dumps(
+            [
+                {"number": 12, "labels": [{"name": "shinobi:ready"}]},
+                {"number": 8, "labels": [{"name": "shinobi:ready"}, {"name": "priority:medium"}]},
+                {"number": 15, "labels": [{"name": "shinobi:ready"}, {"name": "priority:high"}]},
+            ]
+        )
+        result = subprocess.CompletedProcess(
+            args=["gh", "issue", "list"],
+            returncode=0,
+            stdout=issue_list,
+            stderr="",
+        )
+
+        with patch("shinobi.issue_selector.subprocess.run", return_value=result) as run_mock:
+            selected_issue = cli.select_ready_issue(Path("/tmp/repo"), "shinobi:ready")
+
+        self.assertEqual(selected_issue, 15)
+        run_mock.assert_called_once()
+
+    def test_ensure_open_issue_rejects_closed_issue(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "issue", "view", "6"],
+            returncode=0,
+            stdout=json.dumps({"number": 6, "state": "CLOSED"}),
+            stderr="",
+        )
+
+        with patch("shinobi.issue_selector.subprocess.run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "issue #6 is not open"):
+                cli.ensure_open_issue(Path("/tmp/repo"), 6)
 
     def test_acquire_lock_is_atomic_across_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

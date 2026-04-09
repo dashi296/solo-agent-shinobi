@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import discover_workspace_root
-from .issue_selector import select_ready_issue
+from .issue_selector import ensure_open_issue, select_ready_issue
 from .models import State
 from .state_store import StateStore
 
@@ -130,6 +130,12 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
             if selected_issue is None:
                 print(f"run aborted: no open issues labeled {config.labels['ready']}")
                 return 1
+        else:
+            try:
+                selected_issue = ensure_open_issue(root, selected_issue)
+            except RuntimeError as error:
+                print(f"run aborted: {error}")
+                return 1
 
         print(f"run_id: {run_id}")
         if took_over_stale_lock:
@@ -145,12 +151,16 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
 
 def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int]) -> str | None:
     if state.retryable_local_only and state.issue_number is not None:
+        if requested_issue == state.issue_number:
+            return None
         return (
             "retryable local-only mission exists for "
             f"issue #{state.issue_number}; resume/cancel logic is not implemented yet"
         )
 
     if state.phase != "idle" and state.issue_number is not None:
+        if requested_issue == state.issue_number:
+            return None
         return (
             f"local mission state is active for issue #{state.issue_number} "
             f"(phase: {state.phase}); resume logic is not implemented yet"
