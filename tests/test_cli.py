@@ -476,7 +476,7 @@ class CliTest(unittest.TestCase):
             issue_mock.assert_not_called()
             self.assertEqual(StateStore(root).paths.lock_path.read_text(encoding="utf-8"), "")
 
-    def test_run_with_issue_allows_same_issue_when_local_mission_is_active(self) -> None:
+    def test_run_with_issue_refuses_same_issue_when_local_mission_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
@@ -496,12 +496,15 @@ class CliTest(unittest.TestCase):
                             with redirect_stdout(output):
                                 exit_code = cli.main(["run", "--issue", "6"])
 
-            self.assertEqual(exit_code, 0)
-            self.assertIn("selected_issue: 6", output.getvalue())
-            issue_mock.assert_called_once()
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: local mission state is active for issue #6",
+                output.getvalue(),
+            )
+            issue_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
-    def test_run_with_issue_allows_same_issue_when_retryable_local_only_mission_exists(self) -> None:
+    def test_run_with_issue_refuses_same_issue_when_retryable_local_only_mission_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
@@ -522,12 +525,15 @@ class CliTest(unittest.TestCase):
                             with redirect_stdout(output):
                                 exit_code = cli.main(["run", "--issue", "6"])
 
-            self.assertEqual(exit_code, 0)
-            self.assertIn("selected_issue: 6", output.getvalue())
-            issue_mock.assert_called_once()
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: retryable local-only mission exists for issue #6",
+                output.getvalue(),
+            )
+            issue_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
-    def test_run_with_issue_allows_same_issue_when_github_mission_is_active(self) -> None:
+    def test_run_with_issue_refuses_same_issue_when_github_mission_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
@@ -541,14 +547,12 @@ class CliTest(unittest.TestCase):
                             with redirect_stdout(output):
                                 exit_code = cli.main(["run", "--issue", "6"])
 
-            self.assertEqual(exit_code, 0)
-            self.assertIn("selected_issue: 6", output.getvalue())
-            issue_mock.assert_called_once_with(
-                root,
-                6,
-                active_labels=("shinobi:working", "shinobi:reviewing"),
-                allow_active_labels=True,
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: active GitHub mission exists for #6",
+                output.getvalue(),
             )
+            issue_mock.assert_not_called()
             self.assertEqual(StateStore(root).paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_with_issue_refuses_other_active_github_mission_when_target_issue_is_active(self) -> None:
@@ -567,7 +571,7 @@ class CliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
-                "run aborted: active GitHub mission exists for #9",
+                "run aborted: active GitHub mission exists for #6, #9",
                 output.getvalue(),
             )
             issue_mock.assert_not_called()
