@@ -76,7 +76,7 @@ shinobi run --issue 123
 
 `watch` や phase 分離コマンドは将来候補です。MVP の公開 CLI には含めません。
 
-現在の実装では foundations として `shinobi init` / `shinobi status` から着手しています。`run` 系は未実装です。
+現在の実装では foundations に加えて、`shinobi run` / `shinobi run --issue <id>` の select phase 入口まで実装しています。Issue 選択と `.shinobi/run.lock` によるローカル排他は動作しますが、`start` 以降の branch 作成、GitHub state 更新、PR 自動化は未実装です。
 
 ## ドキュメント構成
 
@@ -87,4 +87,4 @@ shinobi run --issue 123
 
 ## 現在の状態
 
-このリポジトリは foundations 実装に着手済みです。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示までを持ち、Issue 選択や PR 自動化はこれから実装します。
+このリポジトリは foundations 実装に加え、`run` の select phase に着手済みです。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示、`run` の issue 選択と stale/live lock 判定までを持ちます。branch 作成、GitHub label/comment 更新、PR 自動化、review loop はこれから実装します。

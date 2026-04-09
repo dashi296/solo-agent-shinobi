@@ -135,6 +135,7 @@ run
 処理:
 
 - run 開始時は GitHub の recovery 判定や state 修復より前に `.shinobi/run.lock` を確認する
+- `.shinobi/run.lock` は unlock 時は空ファイル、lock 中は `agent_identity`, `run_id`, `pid`, `started_at`, `heartbeat_at` を持つ JSON を保存する
 - `.shinobi/run.lock` に他 owner の live run が見つかった場合は、同一 workspace で別 run が進行中とみなして停止する
 - `.shinobi/run.lock` は `heartbeat_at + mission_lease_minutes` を超えたら stale lock とみなし、次の run は reconciliation や recovery に入る前に current `run_id` でその lock を原子的に takeover してから解放または上書きできる
 - select phase で `.shinobi/run.lock` を取得または stale lock を takeover していない run は GitHub の label cleanup や `needs-human` 付与を行わない

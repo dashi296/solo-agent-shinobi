@@ -105,3 +105,27 @@ class State:
         known_fields.discard("extra")
         extra = {key: merged.pop(key) for key in list(merged) if key not in known_fields}
         return cls(**merged, extra=extra)
+
+
+@dataclass
+class RunLock:
+    agent_identity: str
+    run_id: str
+    pid: int
+    started_at: str
+    heartbeat_at: str
+    extra: Dict[str, Any] = field(default_factory=dict, repr=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = asdict(self)
+        extra = payload.pop("extra")
+        payload.update(extra)
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RunLock":
+        merged = dict(data)
+        known_fields = {field.name for field in cls.__dataclass_fields__.values()}
+        known_fields.discard("extra")
+        extra = {key: merged.pop(key) for key in list(merged) if key not in known_fields}
+        return cls(**merged, extra=extra)

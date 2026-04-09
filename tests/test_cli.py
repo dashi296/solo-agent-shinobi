@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -278,6 +279,136 @@ class CliTest(unittest.TestCase):
                 rendered,
             )
             self.assertIn("run `shinobi init` to repair it", rendered)
+
+    def test_run_requires_init(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output = io.StringIO()
+
+            with patch("pathlib.Path.cwd", return_value=root):
+                with redirect_stdout(output):
+                    exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("Run `shinobi init` first.", output.getvalue())
+
+    def test_run_refuses_live_lock_owned_by_another_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    now = datetime.now(timezone.utc).replace(microsecond=0)
+                    store.paths.lock_path.write_text(
+                        json.dumps(
+                            {
+                                "agent_identity": "owner/repo#default@otherhost-11111111",
+                                "run_id": "live-run",
+                                "pid": 123,
+                                "started_at": now.isoformat().replace("+00:00", "Z"),
+                                "heartbeat_at": now.isoformat().replace("+00:00", "Z"),
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("run aborted: run lock is held by live run live-run", output.getvalue())
+            self.assertIn("live-run", store.paths.lock_path.read_text(encoding="utf-8"))
+
+    def test_run_takes_over_stale_lock_and_selects_ready_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    stale_time = (
+                        datetime.now(timezone.utc) - timedelta(days=1)
+                    ).replace(microsecond=0)
+                    store.paths.lock_path.write_text(
+                        json.dumps(
+                            {
+                                "agent_identity": "owner/repo#default@otherhost-11111111",
+                                "run_id": "stale-run",
+                                "pid": 123,
+                                "started_at": stale_time.isoformat().replace("+00:00", "Z"),
+                                "heartbeat_at": stale_time.isoformat().replace("+00:00", "Z"),
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.select_ready_issue", return_value=6):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("run lock: took over stale lock during select phase", rendered)
+            self.assertIn("selected_issue: 6", rendered)
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_with_issue_refuses_conflicting_retryable_local_only_mission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    state = store.load_state()
+                    state.issue_number = 5
+                    state.phase = "start"
+                    state.retryable_local_only = True
+                    store.save_state(state)
+
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        exit_code = cli.main(["run", "--issue", "6"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: retryable local-only mission exists for issue #5",
+                output.getvalue(),
+            )
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_with_issue_uses_requested_issue_when_local_state_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    state = store.load_state()
+                    state.issue_number = 6
+                    state.phase = "start"
+                    state.retryable_local_only = True
+                    store.save_state(state)
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.select_ready_issue") as select_mock:
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["run", "--issue", "6"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("selected_issue: 6", output.getvalue())
+            select_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_init_uses_git_workspace_root_from_subdirectory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
