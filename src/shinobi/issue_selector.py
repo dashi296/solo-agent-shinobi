@@ -7,43 +7,19 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Iterable
 
+from .config import discover_repo_slug
+
 
 PRIORITY_ORDER = {
     "priority:high": 0,
     "priority:medium": 1,
     "priority:low": 2,
 }
+ISSUES_PER_PAGE = 100
 
 
 def select_ready_issue(root: Path, ready_label: str) -> int | None:
-    result = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "list",
-            "--label",
-            ready_label,
-            "--state",
-            "open",
-            "--limit",
-            "100",
-            "--json",
-            "number,labels",
-        ],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RuntimeError(stderr or "failed to list ready issues with gh")
-
-    try:
-        issues = json.loads(result.stdout or "[]")
-    except JSONDecodeError as error:
-        raise RuntimeError("failed to parse ready issue list from gh") from error
-
+    issues = list_open_issues(root, ready_label)
     if not issues:
         return None
 
@@ -54,7 +30,7 @@ def select_ready_issue(root: Path, ready_label: str) -> int | None:
 def ensure_open_issue(root: Path, issue_number: int, *, active_labels: Iterable[str] = ()) -> int:
     issue = load_issue(root, issue_number)
 
-    if issue.get("state") != "OPEN":
+    if str(issue.get("state", "")).upper() != "OPEN":
         raise RuntimeError(f"issue #{issue_number} is not open")
 
     label_names = {
@@ -76,11 +52,8 @@ def load_issue(root: Path, issue_number: int) -> dict:
     result = subprocess.run(
         [
             "gh",
-            "issue",
-            "view",
-            str(issue_number),
-            "--json",
-            "number,state,labels",
+            "api",
+            f"repos/{discover_repo_slug(root)}/issues/{issue_number}",
         ],
         cwd=root,
         check=False,
@@ -100,19 +73,33 @@ def load_issue(root: Path, issue_number: int) -> dict:
 def list_open_issues_with_any_label(root: Path, labels: Sequence[str]) -> list[int]:
     issue_numbers: set[int] = set()
     for label in labels:
+        for issue in list_open_issues(root, label):
+            issue_numbers.add(int(issue["number"]))
+
+    return sorted(issue_numbers)
+
+
+def list_open_issues(root: Path, label: str) -> list[dict]:
+    repo = discover_repo_slug(root)
+    page = 1
+    issues: list[dict] = []
+
+    while True:
         result = subprocess.run(
             [
                 "gh",
-                "issue",
-                "list",
-                "--label",
-                label,
-                "--state",
-                "open",
-                "--limit",
-                "100",
-                "--json",
-                "number",
+                "api",
+                f"repos/{repo}/issues",
+                "--method",
+                "GET",
+                "-f",
+                "state=open",
+                "-f",
+                f"labels={label}",
+                "-f",
+                f"per_page={ISSUES_PER_PAGE}",
+                "-f",
+                f"page={page}",
             ],
             cwd=root,
             check=False,
@@ -124,17 +111,25 @@ def list_open_issues_with_any_label(root: Path, labels: Sequence[str]) -> list[i
             raise RuntimeError(stderr or f"failed to list open issues for label {label}")
 
         try:
-            issues = json.loads(result.stdout or "[]")
+            payload = json.loads(result.stdout or "[]")
         except JSONDecodeError as error:
             raise RuntimeError(
                 f"failed to parse open issue list for label {label}"
             ) from error
 
-        for issue in issues:
-            if isinstance(issue, dict) and "number" in issue:
-                issue_numbers.add(int(issue["number"]))
+        if not isinstance(payload, list):
+            raise RuntimeError(f"failed to parse open issue list for label {label}")
 
-    return sorted(issue_numbers)
+        page_issues = [
+            issue
+            for issue in payload
+            if isinstance(issue, dict) and "number" in issue and "pull_request" not in issue
+        ]
+        issues.extend(page_issues)
+
+        if len(payload) < ISSUES_PER_PAGE:
+            return issues
+        page += 1
 
 
 def issue_priority_key(issue: dict) -> tuple[int, int]:

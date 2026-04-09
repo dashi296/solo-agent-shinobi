@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import discover_workspace_root
-from .issue_selector import ensure_open_issue, list_open_issues_with_any_label, select_ready_issue
+from .issue_selector import (
+    ensure_open_issue,
+    list_open_issues,
+    list_open_issues_with_any_label,
+    select_ready_issue,
+)
 from .models import State
 from .state_store import StateStore
 
@@ -191,11 +196,21 @@ def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int
             "retryable local-only mission exists for "
             f"issue #{state.issue_number}; resume/cancel logic is not implemented yet"
         )
+    if state.retryable_local_only:
+        return (
+            "retryable local-only mission exists but local state is missing issue_number; "
+            "repair/cancel logic is not implemented yet"
+        )
 
     if state.phase != "idle" and state.issue_number is not None:
         return (
             f"local mission state is active for issue #{state.issue_number} "
             f"(phase: {state.phase}); resume logic is not implemented yet"
+        )
+    if state.phase != "idle":
+        return (
+            f"local mission state is active in phase {state.phase} but issue_number is missing; "
+            "repair/resume logic is not implemented yet"
         )
 
     return None
