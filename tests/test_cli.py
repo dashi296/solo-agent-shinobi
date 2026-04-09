@@ -1011,6 +1011,86 @@ class GitHubClientTest(unittest.TestCase):
         self.assertIn("--remove-label", second_command)
         self.assertIn("shinobi:ready", second_command)
 
+    def test_create_issue_comment_runs_gh_issue_comment(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "issue", "comment", "6"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.create_issue_comment(6, "mission started")
+
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:4], ["gh", "issue", "comment", "6"])
+        self.assertIn("--body", command)
+        self.assertIn("mission started", command)
+
+    def test_list_issue_comments_reads_comments_from_issue_view(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "issue", "view", "6"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "comments": [
+                        {"id": "IC_kwDO", "body": "first"},
+                        {"id": "IC_kwDP", "body": "second"},
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                comments = client.list_issue_comments(6)
+
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:6], ["gh", "issue", "view", "6", "--json", "comments"])
+        self.assertEqual([comment["id"] for comment in comments], ["IC_kwDO", "IC_kwDP"])
+
+    def test_list_issue_comments_rejects_non_list_comments_payload(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "issue", "view", "6"],
+            returncode=0,
+            stdout=json.dumps({"comments": "broken"}),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response):
+                client = GitHubClient(Path("/tmp/repo"))
+                with self.assertRaisesRegex(
+                    GitHubClientError,
+                    "failed to parse comments for issue #6: expected comments list",
+                ):
+                    client.list_issue_comments(6)
+
+    def test_update_issue_comment_uses_issue_comment_patch_api(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "api", "repos/owner/repo/issues/comments/123"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.update_issue_comment("123", "mission updated")
+
+        command = run_mock.call_args.args[0]
+        self.assertEqual(
+            command[:5],
+            ["gh", "api", "repos/owner/repo/issues/comments/123", "--method", "PATCH"],
+        )
+        self.assertIn("-f", command)
+        self.assertIn("body=mission updated", command)
+
     def test_create_pull_request_fetches_created_pr_metadata(self) -> None:
         responses = [
             subprocess.CompletedProcess(args=["gh", "pr", "create"], returncode=0, stdout="", stderr=""),

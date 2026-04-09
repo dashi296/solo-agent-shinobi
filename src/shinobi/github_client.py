@@ -81,6 +81,23 @@ class GitHubClient:
             action=f"create comment on issue #{issue_number}",
         )
 
+    def list_issue_comments(self, issue_number: int) -> list[dict[str, Any]]:
+        payload = self._run_gh_json(
+            ["issue", "view", str(issue_number), "--json", "comments"],
+            action=f"list comments on issue #{issue_number}",
+        )
+        if not isinstance(payload, dict):
+            raise GitHubClientError(
+                f"failed to parse comments for issue #{issue_number}: expected object payload"
+            )
+
+        comments = payload.get("comments")
+        if not isinstance(comments, list):
+            raise GitHubClientError(
+                f"failed to parse comments for issue #{issue_number}: expected comments list"
+            )
+        return [comment for comment in comments if isinstance(comment, dict)]
+
     def update_issue_comment(self, comment_id: str, body: str) -> None:
         self._api(
             ["repos/{repo}/issues/comments/{comment_id}", "--method", "PATCH"],
