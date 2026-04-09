@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from shinobi import cli
 from shinobi.config import discover_repo_slug
+from shinobi.github_client import GitHubClient, GitHubClientError
 from shinobi.state_store import StateStore
 
 
@@ -661,9 +662,9 @@ class CliTest(unittest.TestCase):
                             cli.main(["init"])
 
                         output = io.StringIO()
-                        with patch("shinobi.issue_selector.discover_repo_slug", return_value="owner/repo"):
+                        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
                             with patch(
-                                "shinobi.issue_selector.subprocess.run",
+                                "shinobi.github_client.subprocess.run",
                                 side_effect=FileNotFoundError("No such file or directory: 'gh'"),
                             ):
                                 with redirect_stdout(output):
@@ -671,7 +672,7 @@ class CliTest(unittest.TestCase):
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
-                "run aborted: failed to list open issues for label shinobi:working:",
+                "run aborted: failed to list open issues for label shinobi:working with gh:",
                 output.getvalue(),
             )
 
@@ -732,12 +733,13 @@ class CliTest(unittest.TestCase):
                 args=["gh", "api", "repos/owner/repo/issues"],
                 returncode=0,
                 stdout=json.dumps(
-                    [
-                        {"number": 12, "labels": [{"name": "shinobi:ready"}]},
+                    [{"number": 1, "labels": [{"name": "shinobi:ready"}]}]
+                    + [
                         {
-                            "number": 8,
+                            "number": number,
                             "labels": [{"name": "shinobi:ready"}, {"name": "priority:medium"}],
-                        },
+                        }
+                        for number in range(2, 101)
                     ]
                 ),
                 stderr="",
@@ -752,8 +754,9 @@ class CliTest(unittest.TestCase):
             ),
         ]
 
-        with patch("shinobi.issue_selector.subprocess.run", side_effect=responses) as run_mock:
-            selected_issue = cli.select_ready_issue(Path("/tmp/repo"), "shinobi:ready")
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses) as run_mock:
+                selected_issue = cli.select_ready_issue(Path("/tmp/repo"), "shinobi:ready")
 
         self.assertEqual(selected_issue, 15)
         self.assertEqual(run_mock.call_count, 2)
@@ -766,9 +769,10 @@ class CliTest(unittest.TestCase):
             stderr="",
         )
 
-        with patch("shinobi.issue_selector.subprocess.run", return_value=result):
-            with self.assertRaisesRegex(RuntimeError, "issue #6 is not open"):
-                cli.ensure_open_issue(Path("/tmp/repo"), 6)
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                with self.assertRaisesRegex(RuntimeError, "issue #6 is not open"):
+                    cli.ensure_open_issue(Path("/tmp/repo"), 6)
 
     def test_ensure_open_issue_rejects_issue_with_active_label(self) -> None:
         result = subprocess.CompletedProcess(
@@ -784,16 +788,17 @@ class CliTest(unittest.TestCase):
             stderr="",
         )
 
-        with patch("shinobi.issue_selector.subprocess.run", return_value=result):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "issue #6 already has active mission label\\(s\\): shinobi:working",
-            ):
-                cli.ensure_open_issue(
-                    Path("/tmp/repo"),
-                    6,
-                    active_labels=("shinobi:working", "shinobi:reviewing"),
-                )
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "issue #6 already has active mission label\\(s\\): shinobi:working",
+                ):
+                    cli.ensure_open_issue(
+                        Path("/tmp/repo"),
+                        6,
+                        active_labels=("shinobi:working", "shinobi:reviewing"),
+                    )
 
     def test_ensure_open_issue_allows_active_label_when_requested(self) -> None:
         result = subprocess.CompletedProcess(
@@ -809,13 +814,14 @@ class CliTest(unittest.TestCase):
             stderr="",
         )
 
-        with patch("shinobi.issue_selector.subprocess.run", return_value=result):
-            issue_number = cli.ensure_open_issue(
-                Path("/tmp/repo"),
-                6,
-                active_labels=("shinobi:working", "shinobi:reviewing"),
-                allow_active_labels=True,
-            )
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                issue_number = cli.ensure_open_issue(
+                    Path("/tmp/repo"),
+                    6,
+                    active_labels=("shinobi:working", "shinobi:reviewing"),
+                    allow_active_labels=True,
+                )
 
         self.assertEqual(issue_number, 6)
 
@@ -834,12 +840,13 @@ class CliTest(unittest.TestCase):
             stderr="",
         )
 
-        with patch("shinobi.issue_selector.subprocess.run", return_value=result):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "issue #6 is a pull request, not an issue",
-            ):
-                cli.ensure_open_issue(Path("/tmp/repo"), 6)
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "issue #6 is a pull request, not an issue",
+                ):
+                    cli.ensure_open_issue(Path("/tmp/repo"), 6)
 
     def test_list_open_issues_with_any_label_merges_issue_numbers(self) -> None:
         responses = [
@@ -857,8 +864,8 @@ class CliTest(unittest.TestCase):
             ),
         ]
 
-        with patch("shinobi.issue_selector.discover_repo_slug", return_value="owner/repo"):
-            with patch("shinobi.issue_selector.subprocess.run", side_effect=responses):
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses):
                 issue_numbers = cli.list_open_issues_with_any_label(
                     Path("/tmp/repo"),
                     ("shinobi:working", "shinobi:reviewing"),
@@ -893,8 +900,8 @@ class CliTest(unittest.TestCase):
             ),
         ]
 
-        with patch("shinobi.issue_selector.discover_repo_slug", return_value="owner/repo"):
-            with patch("shinobi.issue_selector.subprocess.run", side_effect=responses):
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses):
                 issues = cli.list_open_issues(Path("/tmp/repo"), "shinobi:ready")
 
         self.assertEqual(issues[0]["number"], 1)
@@ -943,7 +950,10 @@ class CliTest(unittest.TestCase):
             self.assertEqual(len(results), 2)
             self.assertEqual(sum(1 for status, _ in results if status == "ok"), 1)
             self.assertEqual(sum(1 for status, _ in results if status == "error"), 1)
-            self.assertIn("run lock is held by live run", next(message for status, message in results if status == "error"))
+            self.assertIn(
+                "run lock is held by live run",
+                next(message for status, message in results if status == "error"),
+            )
 
     def test_init_uses_git_workspace_root_from_subdirectory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -962,6 +972,81 @@ class CliTest(unittest.TestCase):
             self.assertTrue((root / ".shinobi").exists())
             self.assertFalse((nested / ".shinobi").exists())
             self.assertIn(str(root / ".shinobi"), output.getvalue())
+
+
+class GitHubClientTest(unittest.TestCase):
+    def test_get_issue_surfaces_parse_failure_with_context(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "api", "repos/owner/repo/issues/6"],
+            returncode=0,
+            stdout="{broken",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                client = GitHubClient(Path("/tmp/repo"))
+                with self.assertRaisesRegex(
+                    GitHubClientError,
+                    "failed to parse GitHub response while trying to load issue #6",
+                ):
+                    client.get_issue(6)
+
+    def test_update_issue_labels_runs_add_then_remove_operations(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(args=["gh", "issue", "edit", "6"], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=["gh", "issue", "edit", "6"], returncode=0, stdout="", stderr=""),
+        ]
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.update_issue_labels(6, add=["shinobi:working"], remove=["shinobi:ready"])
+
+        self.assertEqual(run_mock.call_count, 2)
+        first_command = run_mock.call_args_list[0].args[0]
+        second_command = run_mock.call_args_list[1].args[0]
+        self.assertIn("--add-label", first_command)
+        self.assertIn("shinobi:working", first_command)
+        self.assertIn("--remove-label", second_command)
+        self.assertIn("shinobi:ready", second_command)
+
+    def test_create_pull_request_fetches_created_pr_metadata(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(args=["gh", "pr", "create"], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(
+                args=["gh", "pr", "view", "feature/issue-25"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "number": 42,
+                        "url": "https://github.com/owner/repo/pull/42",
+                        "isDraft": True,
+                        "headRefName": "feature/issue-25",
+                        "baseRefName": "main",
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                pr = client.create_pull_request(
+                    title="Issue 25",
+                    body="body",
+                    base="main",
+                    head="feature/issue-25",
+                    draft=True,
+                )
+
+        self.assertEqual(pr["number"], 42)
+        self.assertEqual(run_mock.call_count, 2)
+        create_command = run_mock.call_args_list[0].args[0]
+        self.assertIn("--draft", create_command)
+        self.assertIn("--head", create_command)
+        self.assertIn("feature/issue-25", create_command)
 
     def test_init_keeps_shinobi_directory_ignored_by_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

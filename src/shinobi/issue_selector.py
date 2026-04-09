@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import json
-import subprocess
 from collections.abc import Sequence
-from json import JSONDecodeError
 from pathlib import Path
 from typing import Iterable
 
-from .config import discover_repo_slug
+from .github_client import GitHubClient, GitHubClientError
 
 
 PRIORITY_ORDER = {
@@ -59,27 +56,9 @@ def ensure_open_issue(
 
 def load_issue(root: Path, issue_number: int) -> dict:
     try:
-        result = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{discover_repo_slug(root)}/issues/{issue_number}",
-            ],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as error:
-        raise RuntimeError(f"failed to load issue #{issue_number} with gh: {error}") from error
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise RuntimeError(stderr or f"failed to load issue #{issue_number} with gh")
-
-    try:
-        return json.loads(result.stdout or "{}")
-    except JSONDecodeError as error:
-        raise RuntimeError(f"failed to parse issue #{issue_number} from gh") from error
+        return GitHubClient(root).get_issue(issue_number)
+    except GitHubClientError as error:
+        raise RuntimeError(str(error)) from error
 
 
 def list_open_issues_with_any_label(root: Path, labels: Sequence[str]) -> list[int]:
@@ -92,61 +71,10 @@ def list_open_issues_with_any_label(root: Path, labels: Sequence[str]) -> list[i
 
 
 def list_open_issues(root: Path, label: str) -> list[dict]:
-    repo = discover_repo_slug(root)
-    page = 1
-    issues: list[dict] = []
-
-    while True:
-        try:
-            result = subprocess.run(
-                [
-                    "gh",
-                    "api",
-                    f"repos/{repo}/issues",
-                    "--method",
-                    "GET",
-                    "-f",
-                    "state=open",
-                    "-f",
-                    f"labels={label}",
-                    "-f",
-                    f"per_page={ISSUES_PER_PAGE}",
-                    "-f",
-                    f"page={page}",
-                ],
-                cwd=root,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except OSError as error:
-            raise RuntimeError(
-                f"failed to list open issues for label {label}: {error}"
-            ) from error
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            raise RuntimeError(stderr or f"failed to list open issues for label {label}")
-
-        try:
-            payload = json.loads(result.stdout or "[]")
-        except JSONDecodeError as error:
-            raise RuntimeError(
-                f"failed to parse open issue list for label {label}"
-            ) from error
-
-        if not isinstance(payload, list):
-            raise RuntimeError(f"failed to parse open issue list for label {label}")
-
-        page_issues = [
-            issue
-            for issue in payload
-            if isinstance(issue, dict) and "number" in issue and "pull_request" not in issue
-        ]
-        issues.extend(page_issues)
-
-        if len(payload) < ISSUES_PER_PAGE:
-            return issues
-        page += 1
+    try:
+        return GitHubClient(root).list_open_issues(label, per_page=ISSUES_PER_PAGE)
+    except GitHubClientError as error:
+        raise RuntimeError(str(error)) from error
 
 
 def issue_priority_key(issue: dict) -> tuple[int, int]:
