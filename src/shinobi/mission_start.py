@@ -9,8 +9,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .github_client import GitHubClient, GitHubClientError
-from .models import Config, State
+from .models import Config, MissionSummary, State
 from .state_store import StateStore
+
+STATUS_LABEL_KEYS = ("ready", "working", "reviewing", "blocked", "needs_human", "merged")
 
 
 class MissionStartError(RuntimeError):
@@ -35,6 +37,7 @@ def start_mission(
 ) -> StartedMission:
     started_at = now or datetime.now(timezone.utc)
     issue_number = require_startable_issue(issue, config)
+    issue_label_names = get_issue_label_names(issue)
     branch = build_branch_name(issue_number=issue_number, issue_title=str(issue.get("title", "")))
 
     store.require_lock_owner(run_id, config.agent_identity)
@@ -69,7 +72,7 @@ def start_mission(
         ) from error
 
     try:
-        sync_start_labels(root, issue_number, config)
+        sync_start_labels(root, issue_number, config, issue_label_names=issue_label_names)
     except MissionStartError as error:
         provisional_state.last_error = str(error)
         save_retryable_state_or_raise(
@@ -124,6 +127,7 @@ def start_mission(
                 "Shinobi failed to persist final local state during start phase after "
                 f"updating active labels: {error}"
             ),
+            known_label_names={config.labels["working"]},
         )
         provisional_state.last_error = (
             "GitHub labels were updated but final local state persistence failed: "
@@ -145,6 +149,53 @@ def start_mission(
         issue_number=issue_number,
         branch=branch,
         lease_expires_at=lease_expires_at,
+    )
+
+
+def handoff_started_mission(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+    reason: str,
+) -> None:
+    store.require_lock_owner(run_id, config.agent_identity)
+    rollback_error = transition_issue_to_needs_human(
+        root=root,
+        issue_number=started_mission.issue_number,
+        config=config,
+        reason=reason,
+        known_label_names={config.labels["working"]},
+    )
+    if rollback_error is not None:
+        raise MissionStartError(
+            "failed to hand off started mission for "
+            f"issue #{started_mission.issue_number}: {rollback_error}"
+        )
+
+    store.save_state(
+        State(
+            issue_number=None,
+            pr_number=None,
+            branch=None,
+            agent_identity=config.agent_identity,
+            run_id=None,
+            phase="idle",
+            review_loop_count=0,
+            retryable_local_only=False,
+            lease_expires_at=None,
+            last_result="needs-human",
+            last_error=reason,
+            last_mission=MissionSummary(
+                issue_number=started_mission.issue_number,
+                pr_number=None,
+                branch=started_mission.branch,
+                phase="start",
+                conclusion="needs-human",
+            ),
+        )
     )
 
 
@@ -184,6 +235,14 @@ def require_startable_issue(issue: dict, config: Config) -> int:
     return issue_number
 
 
+def get_issue_label_names(issue: dict) -> set[str]:
+    return {
+        label.get("name", "")
+        for label in issue.get("labels", [])
+        if isinstance(label, dict)
+    }
+
+
 def slugify_issue_title(issue_title: str) -> str:
     normalized = unicodedata.normalize("NFKD", issue_title)
     ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
@@ -208,10 +267,20 @@ def create_branch(root: Path, branch: str) -> None:
         raise MissionStartError(f"failed to create branch {branch}: {message}")
 
 
-def sync_start_labels(root: Path, issue_number: int, config: Config) -> None:
+def sync_start_labels(
+    root: Path,
+    issue_number: int,
+    config: Config,
+    *,
+    issue_label_names: set[str],
+) -> None:
     client = GitHubClient(root, repo=config.repo)
     working_label = config.labels["working"]
-    ready_label = config.labels["ready"]
+    removable_labels = labels_to_remove_for_transition(
+        config=config,
+        current_label_names=issue_label_names | {working_label},
+        target_label=working_label,
+    )
 
     try:
         client.update_issue_labels(issue_number, add=[working_label])
@@ -219,7 +288,8 @@ def sync_start_labels(root: Path, issue_number: int, config: Config) -> None:
         raise MissionStartError(f"failed to add {working_label} to issue #{issue_number}: {error}") from error
 
     try:
-        client.update_issue_labels(issue_number, remove=[ready_label])
+        if removable_labels:
+            client.update_issue_labels(issue_number, remove=removable_labels)
     except GitHubClientError as error:
         rollback_error = transition_issue_to_needs_human(
             root=root,
@@ -229,8 +299,11 @@ def sync_start_labels(root: Path, issue_number: int, config: Config) -> None:
                 "Shinobi failed to complete start label transition after adding "
                 f"{working_label}: {error}"
             ),
+            known_label_names=issue_label_names | {working_label},
         )
-        message = f"failed to remove {ready_label} from issue #{issue_number}: {error}"
+        message = (
+            f"failed to normalize start labels for issue #{issue_number}: {error}"
+        )
         if rollback_error is not None:
             message += f"; rollback also failed: {rollback_error}"
         raise MissionStartError(message) from error
@@ -264,6 +337,7 @@ def post_start_comment(
                 "Shinobi failed to create the mission-state comment during start phase "
                 f"after updating active labels: {error}"
             ),
+            known_label_names={config.labels["working"]},
         )
         message = (
             f"failed to create mission-state comment on issue #{issue_number}: {error}"
@@ -303,20 +377,42 @@ def transition_issue_to_needs_human(
     issue_number: int,
     config: Config,
     reason: str,
+    known_label_names: set[str] | None = None,
 ) -> str | None:
     client = GitHubClient(root, repo=config.repo)
-    working_label = config.labels["working"]
-    ready_label = config.labels["ready"]
     needs_human_label = config.labels["needs_human"]
+    removable_labels = labels_to_remove_for_transition(
+        config=config,
+        current_label_names=known_label_names or set(),
+        target_label=needs_human_label,
+    )
 
     try:
         client.update_issue_labels(issue_number, add=[needs_human_label])
-        client.update_issue_labels(issue_number, remove=[ready_label])
-        client.update_issue_labels(issue_number, remove=[working_label])
+        if removable_labels:
+            client.update_issue_labels(issue_number, remove=removable_labels)
         client.create_issue_comment(issue_number, reason)
     except GitHubClientError as error:
         return str(error)
     return None
+
+
+def labels_to_remove_for_transition(
+    *,
+    config: Config,
+    current_label_names: set[str],
+    target_label: str,
+) -> list[str]:
+    state_labels = {
+        config.labels[key]
+        for key in STATUS_LABEL_KEYS
+        if key in config.labels
+    }
+    return sorted(
+        label
+        for label in current_label_names
+        if label in state_labels and label != target_label
+    )
 
 
 def format_final_state_persistence_failure(

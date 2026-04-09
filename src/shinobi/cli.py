@@ -15,9 +15,14 @@ from .issue_selector import (
     list_open_issues_with_any_label,
     select_ready_issue,
 )
-from .mission_start import MissionStartError, start_mission
+from .mission_start import MissionStartError, handoff_started_mission, start_mission
 from .models import State
 from .state_store import StateStore
+
+CONTEXT_PHASE_NOT_IMPLEMENTED_REASON = (
+    "Shinobi completed the start phase, but the context phase is not implemented yet. "
+    "Handing off this mission for manual follow-up."
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -189,6 +194,14 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 issue=issue,
                 now=now,
             )
+            handoff_started_mission(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+                reason=CONTEXT_PHASE_NOT_IMPLEMENTED_REASON,
+            )
         except (MissionStartError, RuntimeError, ValueError) as error:
             print(f"run aborted: {error}")
             return 1
@@ -201,7 +214,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
         print(f"selected_issue: {selected_issue}")
         print(f"started_branch: {started_mission.branch}")
         print(f"lease_expires_at: {started_mission.lease_expires_at}")
-        print("next_phase: context")
+        print("next_phase: manual-handoff")
         return 0
     finally:
         store.clear_lock(run_id)
