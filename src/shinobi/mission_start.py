@@ -33,7 +33,7 @@ def start_mission(
     now: datetime | None = None,
 ) -> StartedMission:
     started_at = now or datetime.now(timezone.utc)
-    issue_number = int(issue["number"])
+    issue_number = require_startable_issue(issue, config)
     branch = build_branch_name(issue_number=issue_number, issue_title=str(issue.get("title", "")))
 
     store.require_lock_owner(run_id, config.agent_identity)
@@ -85,13 +85,16 @@ def start_mission(
     try:
         store.save_state(active_state)
     except OSError as error:
+        rollback_error = rollback_started_labels(root, issue_number, config)
         provisional_state.last_error = (
             "GitHub labels were updated but final local state persistence failed: "
             f"{error}"
         )
+        if rollback_error is not None:
+            provisional_state.last_error += f"; rollback also failed: {rollback_error}"
         store.save_state(provisional_state)
         raise MissionStartError(
-            "GitHub labels were updated but final local state persistence failed"
+            format_final_state_persistence_failure(issue_number, error, rollback_error)
         ) from error
 
     return StartedMission(
@@ -104,6 +107,37 @@ def start_mission(
 def build_branch_name(*, issue_number: int, issue_title: str) -> str:
     slug = slugify_issue_title(issue_title)
     return f"feature/issue-{issue_number}-{slug}"
+
+
+def require_startable_issue(issue: dict, config: Config) -> int:
+    issue_number = int(issue["number"])
+    if "pull_request" in issue:
+        raise MissionStartError(f"issue #{issue_number} is a pull request, not an issue")
+
+    if str(issue.get("state", "")).upper() != "OPEN":
+        raise MissionStartError(f"issue #{issue_number} is not open")
+
+    label_names = {
+        label.get("name", "")
+        for label in issue.get("labels", [])
+        if isinstance(label, dict)
+    }
+    ready_label = config.labels["ready"]
+    if ready_label not in label_names:
+        raise MissionStartError(f"issue #{issue_number} is not labeled {ready_label}")
+
+    blocked_label = config.labels["blocked"]
+    needs_human_label = config.labels["needs_human"]
+    conflicting_labels = sorted(
+        label for label in (blocked_label, needs_human_label) if label in label_names
+    )
+    if conflicting_labels:
+        joined = ", ".join(conflicting_labels)
+        raise MissionStartError(
+            f"issue #{issue_number} has non-startable label(s): {joined}"
+        )
+
+    return issue_number
 
 
 def slugify_issue_title(issue_title: str) -> str:
@@ -148,6 +182,33 @@ def sync_start_labels(root: Path, issue_number: int, config: Config) -> None:
         if rollback_error is not None:
             message += f"; rollback also failed: {rollback_error}"
         raise MissionStartError(message) from error
+
+
+def rollback_started_labels(root: Path, issue_number: int, config: Config) -> str | None:
+    client = GitHubClient(root, repo=config.repo)
+    ready_label = config.labels["ready"]
+    working_label = config.labels["working"]
+
+    try:
+        client.update_issue_labels(issue_number, add=[ready_label])
+        client.update_issue_labels(issue_number, remove=[working_label])
+    except GitHubClientError as error:
+        return str(error)
+    return None
+
+
+def format_final_state_persistence_failure(
+    issue_number: int,
+    error: OSError,
+    rollback_error: str | None,
+) -> str:
+    message = (
+        "GitHub labels were updated but final local state persistence failed for "
+        f"issue #{issue_number}: {error}"
+    )
+    if rollback_error is not None:
+        message += f"; rollback also failed: {rollback_error}"
+    return message
 
 
 def rollback_working_label(

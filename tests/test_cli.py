@@ -1025,7 +1025,12 @@ class MissionStartTest(unittest.TestCase):
                         store=store,
                         config=config,
                         run_id=run_id,
-                        issue={"number": 26, "title": "[TASK] run start phase を実装する"},
+                        issue={
+                            "number": 26,
+                            "title": "[TASK] run start phase を実装する",
+                            "labels": [{"name": "shinobi:ready"}],
+                            "state": "open",
+                        },
                         now=now,
                     )
 
@@ -1092,7 +1097,12 @@ class MissionStartTest(unittest.TestCase):
                             store=store,
                             config=config,
                             run_id=run_id,
-                            issue={"number": 26, "title": "[TASK] run start phase を実装する"},
+                            issue={
+                                "number": 26,
+                                "title": "[TASK] run start phase を実装する",
+                                "labels": [{"name": "shinobi:ready"}],
+                                "state": "open",
+                            },
                             now=now,
                         )
 
@@ -1110,6 +1120,153 @@ class MissionStartTest(unittest.TestCase):
                     unittest.mock.call(26, remove=["shinobi:working"]),
                 ],
             )
+
+    def test_start_mission_rolls_back_labels_when_final_state_save_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+            store = StateStore(root)
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            run_id = "run-123"
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(
+                config=config,
+                run_id=run_id,
+                pid=123,
+                now=now,
+            )
+
+            real_save_state = store.save_state
+
+            def failing_save_state(state):
+                real_save_state(state)
+                if state.last_result == "started":
+                    raise OSError("disk full")
+
+            with patch(
+                "shinobi.mission_start.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["git", "checkout", "-b", "feature/issue-26-task-run-start-phase"],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+            ):
+                with patch("shinobi.mission_start.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    with patch.object(store, "save_state", side_effect=failing_save_state):
+                        with self.assertRaisesRegex(
+                            MissionStartError,
+                            "final local state persistence failed for issue #26: disk full",
+                        ):
+                            start_mission(
+                                root=root,
+                                store=store,
+                                config=config,
+                                run_id=run_id,
+                                issue={
+                                    "number": 26,
+                                    "title": "[TASK] run start phase を実装する",
+                                    "labels": [{"name": "shinobi:ready"}],
+                                    "state": "open",
+                                },
+                                now=now,
+                            )
+
+            state = store.load_state()
+            self.assertEqual(state.issue_number, 26)
+            self.assertTrue(state.retryable_local_only)
+            self.assertIn("disk full", state.last_error or "")
+            self.assertEqual(
+                client.update_issue_labels.call_args_list,
+                [
+                    unittest.mock.call(26, add=["shinobi:working"]),
+                    unittest.mock.call(26, remove=["shinobi:ready"]),
+                    unittest.mock.call(26, add=["shinobi:ready"]),
+                    unittest.mock.call(26, remove=["shinobi:working"]),
+                ],
+            )
+
+    def test_start_mission_rejects_issue_without_ready_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+            store = StateStore(root)
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            run_id = "run-123"
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(
+                config=config,
+                run_id=run_id,
+                pid=123,
+                now=now,
+            )
+
+            with self.assertRaisesRegex(
+                MissionStartError,
+                "issue #26 is not labeled shinobi:ready",
+            ):
+                start_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    issue={
+                        "number": 26,
+                        "title": "[TASK] run start phase を実装する",
+                        "labels": [{"name": "shinobi:blocked"}],
+                        "state": "open",
+                    },
+                    now=now,
+                )
+
+    def test_start_mission_rejects_blocked_issue_even_if_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+            store = StateStore(root)
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            run_id = "run-123"
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(
+                config=config,
+                run_id=run_id,
+                pid=123,
+                now=now,
+            )
+
+            with self.assertRaisesRegex(
+                MissionStartError,
+                "issue #26 has non-startable label\\(s\\): shinobi:blocked",
+            ):
+                start_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    issue={
+                        "number": 26,
+                        "title": "[TASK] run start phase を実装する",
+                        "labels": [{"name": "shinobi:ready"}, {"name": "shinobi:blocked"}],
+                        "state": "open",
+                    },
+                    now=now,
+                )
 
 
 class GitHubClientTest(unittest.TestCase):
