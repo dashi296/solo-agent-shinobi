@@ -214,6 +214,23 @@ class StateStore:
                 return
             self._write_lock_to_file(lock_file, None)
 
+    def require_lock_owner(self, run_id: str, agent_identity: str) -> RunLock:
+        self.paths.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.paths.lock_path.open("a+", encoding="utf-8") as lock_file:
+            self._lock_file(lock_file)
+            try:
+                lock = self._load_lock_from_file(lock_file)
+            except (JSONDecodeError, TypeError, ValueError) as error:
+                raise ValueError(f"failed to load run lock: {error}") from error
+            if lock is None:
+                raise RuntimeError("run lock is missing before start phase")
+            if lock.run_id != run_id or lock.agent_identity != agent_identity:
+                raise RuntimeError(
+                    "run lock owner changed before start phase "
+                    f"(expected {run_id}/{agent_identity}, got {lock.run_id}/{lock.agent_identity})"
+                )
+            return lock
+
     def acquire_lock(
         self,
         *,

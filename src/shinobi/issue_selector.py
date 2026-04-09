@@ -15,8 +15,8 @@ PRIORITY_ORDER = {
 ISSUES_PER_PAGE = 100
 
 
-def select_ready_issue(root: Path, ready_label: str) -> int | None:
-    issues = list_open_issues(root, ready_label)
+def select_ready_issue(root: Path, ready_label: str, *, repo: str | None = None) -> int | None:
+    issues = list_open_issues(root, ready_label, repo=repo)
     if not issues:
         return None
 
@@ -30,8 +30,9 @@ def ensure_open_issue(
     *,
     active_labels: Iterable[str] = (),
     allow_active_labels: bool = False,
+    repo: str | None = None,
 ) -> int:
-    issue = load_issue(root, issue_number)
+    issue = load_issue(root, issue_number, repo=repo)
 
     if "pull_request" in issue:
         raise RuntimeError(f"issue #{issue_number} is a pull request, not an issue")
@@ -54,25 +55,27 @@ def ensure_open_issue(
     return int(issue["number"])
 
 
-def load_issue(root: Path, issue_number: int) -> dict:
+def load_issue(root: Path, issue_number: int, *, repo: str | None = None) -> dict:
     try:
-        return GitHubClient(root).get_issue(issue_number)
+        return GitHubClient(root, repo=repo).get_issue(issue_number)
     except GitHubClientError as error:
         raise RuntimeError(str(error)) from error
 
 
-def list_open_issues_with_any_label(root: Path, labels: Sequence[str]) -> list[int]:
+def list_open_issues_with_any_label(
+    root: Path, labels: Sequence[str], *, repo: str | None = None
+) -> list[int]:
     issue_numbers: set[int] = set()
     for label in labels:
-        for issue in list_open_issues(root, label):
+        for issue in list_open_issues(root, label, repo=repo):
             issue_numbers.add(int(issue["number"]))
 
     return sorted(issue_numbers)
 
 
-def list_open_issues(root: Path, label: str) -> list[dict]:
+def list_open_issues(root: Path, label: str, *, repo: str | None = None) -> list[dict]:
     try:
-        return GitHubClient(root).list_open_issues(label, per_page=ISSUES_PER_PAGE)
+        return GitHubClient(root, repo=repo).list_open_issues(label, per_page=ISSUES_PER_PAGE)
     except GitHubClientError as error:
         raise RuntimeError(str(error)) from error
 
