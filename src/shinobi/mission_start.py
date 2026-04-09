@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import unicodedata
@@ -55,6 +56,14 @@ def start_mission(
     try:
         store.save_state(provisional_state)
     except OSError as error:
+        persist_retryable_start_failure(
+            store=store,
+            state=provisional_state,
+            error_message=(
+                f"failed to persist local mission state after creating branch {branch}: {error}"
+            ),
+            started_at=started_at,
+        )
         raise MissionStartError(
             f"failed to persist local mission state after creating branch {branch}: {error}"
         ) from error
@@ -85,7 +94,15 @@ def start_mission(
     try:
         store.save_state(active_state)
     except OSError as error:
-        rollback_error = rollback_started_labels(root, issue_number, config)
+        rollback_error = transition_issue_to_needs_human(
+            root=root,
+            issue_number=issue_number,
+            config=config,
+            reason=(
+                "Shinobi failed to persist final local state during start phase after "
+                f"updating active labels: {error}"
+            ),
+        )
         provisional_state.last_error = (
             "GitHub labels were updated but final local state persistence failed: "
             f"{error}"
@@ -177,21 +194,36 @@ def sync_start_labels(root: Path, issue_number: int, config: Config) -> None:
     try:
         client.update_issue_labels(issue_number, remove=[ready_label])
     except GitHubClientError as error:
-        rollback_error = rollback_working_label(client, issue_number, working_label)
+        rollback_error = transition_issue_to_needs_human(
+            root=root,
+            issue_number=issue_number,
+            config=config,
+            reason=(
+                "Shinobi failed to complete start label transition after adding "
+                f"{working_label}: {error}"
+            ),
+        )
         message = f"failed to remove {ready_label} from issue #{issue_number}: {error}"
         if rollback_error is not None:
             message += f"; rollback also failed: {rollback_error}"
         raise MissionStartError(message) from error
 
 
-def rollback_started_labels(root: Path, issue_number: int, config: Config) -> str | None:
+def transition_issue_to_needs_human(
+    *,
+    root: Path,
+    issue_number: int,
+    config: Config,
+    reason: str,
+) -> str | None:
     client = GitHubClient(root, repo=config.repo)
-    ready_label = config.labels["ready"]
     working_label = config.labels["working"]
+    needs_human_label = config.labels["needs_human"]
 
     try:
-        client.update_issue_labels(issue_number, add=[ready_label])
+        client.update_issue_labels(issue_number, add=[needs_human_label])
         client.update_issue_labels(issue_number, remove=[working_label])
+        client.create_issue_comment(issue_number, reason)
     except GitHubClientError as error:
         return str(error)
     return None
@@ -210,14 +242,29 @@ def format_final_state_persistence_failure(
         message += f"; rollback also failed: {rollback_error}"
     return message
 
-
-def rollback_working_label(
-    client: GitHubClient,
-    issue_number: int,
-    working_label: str,
-) -> str | None:
+def persist_retryable_start_failure(
+    *,
+    store: StateStore,
+    state: State,
+    error_message: str,
+    started_at: datetime,
+) -> None:
+    state.last_error = error_message
+    payload = {
+        "started_at": store.format_timestamp(started_at),
+        "issue_number": state.issue_number,
+        "branch": state.branch,
+        "phase": state.phase,
+        "agent_identity": state.agent_identity,
+        "run_id": state.run_id,
+        "retryable_local_only": state.retryable_local_only,
+        "last_result": state.last_result,
+        "last_error": state.last_error,
+    }
+    log_path = store.paths.logs_dir / "retryable-start-failures.jsonl"
     try:
-        client.update_issue_labels(issue_number, remove=[working_label])
-    except GitHubClientError as error:
-        return str(error)
-    return None
+        store.paths.logs_dir.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except OSError:
+        return
