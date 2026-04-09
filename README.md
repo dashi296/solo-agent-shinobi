@@ -76,6 +76,8 @@ shinobi run --issue 123
 
 `watch` や phase 分離コマンドは将来候補です。MVP の公開 CLI には含めません。
 
+現在の実装では foundations として `shinobi init` / `shinobi status` から着手しています。`run` 系は未実装です。
+
 ## ドキュメント構成
 
 - [docs/product-spec.md](./docs/product-spec.md): プロダクト仕様、ワークフロー、状態遷移、CLI と設定の設計
@@ -85,4 +87,4 @@ shinobi run --issue 123
 
 ## 現在の状態
 
-このリポジトリは設計段階です。実装前に、Issue 駆動の運用モデル、停止条件、マージポリシー、責務分離を先に固めます。
+このリポジトリは foundations 実装に着手済みです。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示までを持ち、Issue 選択や PR 自動化はこれから実装します。

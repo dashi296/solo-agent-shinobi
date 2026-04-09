@@ -29,6 +29,7 @@ GitHub Actions
 
 ```text
 .shinobi/
+  config.json
   state.json
   summary.md
   decisions.md
@@ -36,6 +37,8 @@ GitHub Actions
   logs/
   cache/
 ```
+
+MVP foundations では設定を `.shinobi/config.json` に保持します。
 
 ### `.shinobi/state.json`
 
@@ -192,7 +195,7 @@ Use a concise and calm ninja-like tone.
 
 ## 依存コンポーネント候補
 
-- Python 3.11+
+- Python 3.9+
 - Git
 - GitHub CLI (`gh`) または GitHub API client
 - GitHub Actions

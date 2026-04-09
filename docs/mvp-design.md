@@ -81,8 +81,8 @@ shinobi run --issue 123
 ### `shinobi init`
 
 - `.shinobi/` ディレクトリを作る
-- `config.yml` の雛形を作る
-- workspace / installation ごとに一意な `agent_identity` を生成して `config.yml` へ書き込む
+- `.shinobi/config.json` の雛形を作る
+- workspace / installation ごとに一意な `agent_identity` を生成して `.shinobi/config.json` へ書き込む
 - `.shinobi/summary.md` と `.shinobi/decisions.md` の空テンプレートを作る
 - `.shinobi/run.lock` を初期化可能な状態にする
 - 初回動作に必要な前提を表示する
@@ -414,7 +414,7 @@ MVP では既存アーキテクチャ案を次のように具体化します。
 
 ### `config.py`
 
-- `config.yml` を読む
+- `.shinobi/config.json` を読む
 - default 値を補完する
 - unsafe な設定を起動時に拒否する
 
@@ -556,35 +556,35 @@ high-risk path は config で追加可能にします。
 
 ## 設定ファイル設計
 
-`config.yml` 例:
+`.shinobi/config.json` 例:
 
-```yaml
-repo: owner/repo
-main_branch: main
-ready_label: shinobi:ready
-working_label: shinobi:working
-reviewing_label: shinobi:reviewing
-blocked_label: shinobi:blocked
-needs_human_label: shinobi:needs-human
-merged_label: shinobi:merged
-risky_label: shinobi:risky
-agent_identity: owner/repo#default@mbp14-7f3a2c
-mission_lease_minutes: 30
-mission_heartbeat_interval_minutes: 5
-max_review_loops: 3
-max_commits_per_issue: 8
-max_changed_files: 20
-max_lines_changed: 800
-max_runtime_minutes: 30
-max_token_budget: 40000
-auto_merge: true
-use_draft_pr: true
-merge_method: squash
-high_risk_paths:
-  - migrations/
-  - infra/
-  - auth/
-  - billing/
+```json
+{
+  "repo": "owner/repo",
+  "main_branch": "main",
+  "agent_identity": "owner/repo#default@mbp14-7f3a2c",
+  "mission_lease_minutes": 30,
+  "mission_heartbeat_interval_minutes": 5,
+  "max_review_loops": 3,
+  "max_commits_per_issue": 8,
+  "max_changed_files": 20,
+  "max_lines_changed": 800,
+  "max_runtime_minutes": 30,
+  "max_token_budget": 40000,
+  "auto_merge": true,
+  "use_draft_pr": true,
+  "merge_method": "squash",
+  "labels": {
+    "ready": "shinobi:ready",
+    "working": "shinobi:working",
+    "reviewing": "shinobi:reviewing",
+    "blocked": "shinobi:blocked",
+    "needs_human": "shinobi:needs-human",
+    "merged": "shinobi:merged",
+    "risky": "shinobi:risky"
+  },
+  "high_risk_paths": ["migrations/", "infra/", "auth/", "billing/"]
+}
 ```
 
 方針:
