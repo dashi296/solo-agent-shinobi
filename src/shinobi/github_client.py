@@ -81,7 +81,31 @@ class GitHubClient:
             action=f"create comment on issue #{issue_number}",
         )
 
-    def update_issue_comment(self, comment_id: str, body: str) -> None:
+    def list_issue_comments(self, issue_number: int, *, per_page: int = 100) -> list[dict[str, Any]]:
+        page = 1
+        comments: list[dict[str, Any]] = []
+
+        while True:
+            payload = self._api_json(
+                ["repos/{repo}/issues/{issue_number}/comments", "--method", "GET"],
+                action=f"list comments on issue #{issue_number}",
+                fields={
+                    "per_page": str(per_page),
+                    "page": str(page),
+                },
+                issue_number=issue_number,
+            )
+            if not isinstance(payload, list):
+                raise GitHubClientError(
+                    f"failed to parse comments for issue #{issue_number}: expected list payload"
+                )
+
+            comments.extend(comment for comment in payload if isinstance(comment, dict))
+            if len(payload) < per_page:
+                return comments
+            page += 1
+
+    def update_issue_comment(self, comment_id: int, body: str) -> None:
         self._api(
             ["repos/{repo}/issues/comments/{comment_id}", "--method", "PATCH"],
             action=f"update comment {comment_id}",
