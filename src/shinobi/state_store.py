@@ -3,12 +3,18 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Tuple
 
+try:
+    import fcntl
+except ModuleNotFoundError:
+    fcntl = None
+
 from .config import default_config, load_config, save_config
-from .models import Config, State
+from .models import Config, RunLock, State
 
 
 SUMMARY_TEMPLATE = """# Shinobi Summary
@@ -62,6 +68,7 @@ class WorkspacePaths:
     @property
     def cache_dir(self) -> Path:
         return self.shinobi_dir / "cache"
+
 
 class StateStore:
     def __init__(self, root: Path) -> None:
@@ -178,3 +185,107 @@ class StateStore:
 
     def has_state(self) -> bool:
         return self.paths.config_path.exists() or self.paths.state_path.exists()
+
+    def try_load_lock(self) -> Tuple[RunLock | None, str | None]:
+        try:
+            return self.load_lock(), None
+        except (OSError, JSONDecodeError, TypeError, ValueError) as error:
+            return None, str(error)
+
+    def load_lock(self) -> RunLock | None:
+        if not self.paths.lock_path.exists():
+            return None
+        content = self.paths.lock_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        return RunLock.from_dict(json.loads(content))
+
+    def save_lock(self, lock: RunLock) -> None:
+        self.paths.lock_path.write_text(
+            json.dumps(lock.to_dict(), indent=2) + "\n", encoding="utf-8"
+        )
+
+    def clear_lock(self, run_id: str) -> None:
+        self.paths.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.paths.lock_path.open("a+", encoding="utf-8") as lock_file:
+            self._lock_file(lock_file)
+            lock = self._load_lock_from_file(lock_file)
+            if lock is None or lock.run_id != run_id:
+                return
+            self._write_lock_to_file(lock_file, None)
+
+    def acquire_lock(
+        self,
+        *,
+        config: Config,
+        run_id: str,
+        pid: int,
+        now: datetime,
+    ) -> Tuple[RunLock, bool]:
+        timestamp = self.format_timestamp(now)
+        lock = RunLock(
+            agent_identity=config.agent_identity,
+            run_id=run_id,
+            pid=pid,
+            started_at=timestamp,
+            heartbeat_at=timestamp,
+        )
+        self.paths.lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with self.paths.lock_path.open("a+", encoding="utf-8") as lock_file:
+            self._lock_file(lock_file)
+            try:
+                existing = self._load_lock_from_file(lock_file)
+                if existing is not None and not self.is_lock_stale(existing, config, now):
+                    raise RuntimeError(
+                        f"run lock is held by live run {existing.run_id} ({existing.agent_identity})"
+                    )
+            except (JSONDecodeError, TypeError, ValueError) as error:
+                raise ValueError(f"failed to load run lock: {error}") from error
+
+            took_over_stale_lock = existing is not None
+            self._write_lock_to_file(lock_file, lock)
+            return lock, took_over_stale_lock
+
+    def is_lock_stale(self, lock: RunLock, config: Config, now: datetime) -> bool:
+        heartbeat_at = self.parse_timestamp(lock.heartbeat_at)
+        lease_deadline = heartbeat_at + timedelta(minutes=config.mission_lease_minutes)
+        return now > lease_deadline
+
+    @staticmethod
+    def _lock_file(lock_file) -> None:
+        if fcntl is None:
+            raise RuntimeError("run locking is not supported on this platform")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _load_lock_from_file(lock_file) -> RunLock | None:
+        lock_file.seek(0)
+        content = lock_file.read().strip()
+        if not content:
+            return None
+        return RunLock.from_dict(json.loads(content))
+
+    @staticmethod
+    def _write_lock_to_file(lock_file, lock: RunLock | None) -> None:
+        content = ""
+        if lock is not None:
+            content = json.dumps(lock.to_dict(), indent=2) + "\n"
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(content)
+        lock_file.flush()
+
+    @staticmethod
+    def parse_timestamp(value: str) -> datetime:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            raise ValueError("timestamp must include timezone offset")
+        return parsed
+
+    @staticmethod
+    def format_timestamp(value: datetime) -> str:
+        return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        )

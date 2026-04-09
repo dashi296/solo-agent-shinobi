@@ -58,6 +58,7 @@ MVP foundations では設定を `.shinobi/config.json` に保持します。
 ### `.shinobi/run.lock`
 
 - 同一 workspace で live run を 1 つに制限するローカル排他ファイル
+- unlock 時は空ファイル、lock 中は JSON オブジェクトを保存する
 - `agent_identity`, `run_id`, `pid`, `started_at`, `heartbeat_at` を保持する
 - `heartbeat_at + mission_lease_minutes` を過ぎた lock は stale とみなし、次の run が recovery 開始前に解放または上書きできる
 - stale でない live mission への二重 attach を防ぐ
