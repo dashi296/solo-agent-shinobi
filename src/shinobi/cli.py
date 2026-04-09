@@ -155,13 +155,10 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 print(f"run aborted: no open issues labeled {config.labels['ready']}")
                 return 1
         else:
-            conflicting_active_issues = [
-                number for number in active_issue_numbers if number != selected_issue
-            ]
-            if conflicting_active_issues:
-                rendered = ", ".join(f"#{number}" for number in conflicting_active_issues)
+            if active_issue_numbers:
+                rendered = ", ".join(f"#{number}" for number in active_issue_numbers)
                 print(
-                    "run aborted: another active GitHub mission exists for "
+                    "run aborted: active GitHub mission exists for "
                     f"{rendered}; targeted resume/cancel is not implemented yet"
                 )
                 return 1
@@ -173,7 +170,6 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                         config.labels["working"],
                         config.labels["reviewing"],
                     ),
-                    allow_active_labels=True,
                 )
             except RuntimeError as error:
                 print(f"run aborted: {error}")
@@ -192,11 +188,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
 
 
 def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int]) -> str | None:
-    same_requested_issue = requested_issue is not None and state.issue_number == requested_issue
-
     if state.retryable_local_only and state.issue_number is not None:
-        if same_requested_issue:
-            return None
         return (
             "retryable local-only mission exists for "
             f"issue #{state.issue_number}; resume/cancel logic is not implemented yet"
@@ -208,8 +200,6 @@ def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int
         )
 
     if state.phase != "idle" and state.issue_number is not None:
-        if same_requested_issue:
-            return None
         return (
             f"local mission state is active for issue #{state.issue_number} "
             f"(phase: {state.phase}); resume logic is not implemented yet"
