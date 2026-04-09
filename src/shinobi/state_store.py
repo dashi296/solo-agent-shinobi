@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
@@ -66,15 +67,6 @@ class WorkspacePaths:
     def gitignore_path(self) -> Path:
         return self.root / ".gitignore"
 
-    @property
-    def git_dir(self) -> Path:
-        return self.root / ".git"
-
-    @property
-    def git_info_exclude_path(self) -> Path:
-        return self.git_dir / "info" / "exclude"
-
-
 class StateStore:
     def __init__(self, root: Path) -> None:
         self.paths = WorkspacePaths(root=root)
@@ -128,11 +120,15 @@ class StateStore:
         return config, state
 
     def ensure_shinobi_ignored(self) -> None:
-        if not self.paths.git_dir.exists():
+        exclude_path = self.resolve_git_info_exclude_path()
+        if exclude_path is None:
             return
 
-        exclude_path = self.paths.git_info_exclude_path
-        lines = exclude_path.read_text(encoding="utf-8").splitlines() if exclude_path.exists() else []
+        lines = (
+            exclude_path.read_text(encoding="utf-8").splitlines()
+            if exclude_path.exists()
+            else []
+        )
 
         if any(line.strip() in {".shinobi", ".shinobi/"} for line in lines):
             return
@@ -141,7 +137,24 @@ class StateStore:
         if content and not content.endswith("\n"):
             content += "\n"
         content += ".shinobi/\n"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
         exclude_path.write_text(content, encoding="utf-8")
+
+    def resolve_git_info_exclude_path(self) -> Path | None:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=self.paths.root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        git_path = result.stdout.strip()
+        if not git_path:
+            return None
+        resolved = Path(git_path)
+        if not resolved.is_absolute():
+            resolved = self.paths.root / resolved
+        return resolved
 
     def load_state(self) -> State:
         return State.from_dict(json.loads(self.paths.state_path.read_text(encoding="utf-8")))

@@ -316,6 +316,57 @@ class CliTest(unittest.TestCase):
             ).stdout
             self.assertEqual(status.strip(), "?? .gitignore")
 
+    def test_init_adds_shinobi_directory_to_worktree_git_info_exclude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            worktree = Path(tmp_dir) / "worktree"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "test"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "init"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "remote", "add", "origin", "https://github.com/owner/repo.git"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "worktree", "add", str(worktree), "-b", "test-worktree"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+
+            with patch("pathlib.Path.cwd", return_value=worktree):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            ignored = subprocess.run(
+                ["git", "check-ignore", ".shinobi/state.json"],
+                cwd=worktree,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertEqual(ignored.strip(), ".shinobi/state.json")
+
     def test_packaging_declares_shinobi_package(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             wheel_dir = Path(tmp_dir)
@@ -353,6 +404,35 @@ class CliTest(unittest.TestCase):
             repo = discover_repo_slug(Path("."))
 
         self.assertEqual(repo, "owner/repo")
+
+    def test_init_preserves_unknown_config_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps(
+                    {
+                        "repo": "owner/repo",
+                        "agent_identity": "owner/repo#default@testhost-12345678",
+                        "future_flag": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("pathlib.Path.cwd", return_value=root):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            repaired_config = json.loads(store.paths.config_path.read_text(encoding="utf-8"))
+            self.assertEqual(repaired_config["repo"], "owner/repo")
+            self.assertEqual(
+                repaired_config["agent_identity"],
+                "owner/repo#default@testhost-12345678",
+            )
+            self.assertTrue(repaired_config["future_flag"])
 
 
 if __name__ == "__main__":

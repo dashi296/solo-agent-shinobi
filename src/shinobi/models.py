@@ -35,9 +35,13 @@ class Config:
     high_risk_paths: List[str] = field(
         default_factory=lambda: ["migrations/", "infra/", "auth/", "billing/"]
     )
+    extra: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        extra = payload.pop("extra")
+        payload.update(extra)
+        return payload
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Config":
@@ -45,7 +49,10 @@ class Config:
         labels = dict(DEFAULT_LABELS)
         labels.update(merged.get("labels", {}))
         merged["labels"] = labels
-        return cls(**merged)
+        known_fields = {field.name for field in cls.__dataclass_fields__.values()}
+        known_fields.discard("extra")
+        extra = {key: merged.pop(key) for key in list(merged) if key not in known_fields}
+        return cls(**merged, extra=extra)
 
 
 @dataclass
