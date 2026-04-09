@@ -120,13 +120,17 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
             print(f"run aborted: {conflict}")
             return 1
 
-        active_issue_numbers = list_open_issues_with_any_label(
-            root,
-            (
-                config.labels["working"],
-                config.labels["reviewing"],
-            ),
-        )
+        try:
+            active_issue_numbers = list_open_issues_with_any_label(
+                root,
+                (
+                    config.labels["working"],
+                    config.labels["reviewing"],
+                ),
+            )
+        except RuntimeError as error:
+            print(f"run aborted: {error}")
+            return 1
 
         selected_issue = issue_number
         if selected_issue is None:
@@ -157,7 +161,14 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 )
                 return 1
             try:
-                selected_issue = ensure_open_issue(root, selected_issue)
+                selected_issue = ensure_open_issue(
+                    root,
+                    selected_issue,
+                    active_labels=(
+                        config.labels["working"],
+                        config.labels["reviewing"],
+                    ),
+                )
             except RuntimeError as error:
                 print(f"run aborted: {error}")
                 return 1
