@@ -87,15 +87,21 @@ class State:
     last_result: Optional[str] = "initialized"
     last_error: Optional[str] = None
     last_mission: Optional[MissionSummary] = None
+    extra: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
+        extra = payload.pop("extra")
         if self.last_mission is not None:
             payload["last_mission"] = self.last_mission.to_dict()
+        payload.update(extra)
         return payload
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "State":
         merged = dict(data)
         merged["last_mission"] = MissionSummary.from_dict(merged.get("last_mission"))
-        return cls(**merged)
+        known_fields = {field.name for field in cls.__dataclass_fields__.values()}
+        known_fields.discard("extra")
+        extra = {key: merged.pop(key) for key in list(merged) if key not in known_fields}
+        return cls(**merged, extra=extra)

@@ -63,10 +63,6 @@ class WorkspacePaths:
     def cache_dir(self) -> Path:
         return self.shinobi_dir / "cache"
 
-    @property
-    def gitignore_path(self) -> Path:
-        return self.root / ".gitignore"
-
 class StateStore:
     def __init__(self, root: Path) -> None:
         self.paths = WorkspacePaths(root=root)

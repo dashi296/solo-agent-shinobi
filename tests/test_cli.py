@@ -434,6 +434,36 @@ class CliTest(unittest.TestCase):
             )
             self.assertTrue(repaired_config["future_flag"])
 
+    def test_init_preserves_unknown_state_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.state_path.write_text(
+                json.dumps(
+                    {
+                        "agent_identity": "owner/repo#default@testhost-12345678",
+                        "phase": "idle",
+                        "branch": "feature/test",
+                        "future_field": {"enabled": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("pathlib.Path.cwd", return_value=root):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            repaired_state = json.loads(store.paths.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                repaired_state["agent_identity"],
+                "owner/repo#default@testhost-12345678",
+            )
+            self.assertEqual(repaired_state["branch"], "feature/test")
+            self.assertEqual(repaired_state["future_field"], {"enabled": True})
+
 
 if __name__ == "__main__":
     unittest.main()
