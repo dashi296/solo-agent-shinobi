@@ -4,6 +4,7 @@ import json
 import subprocess
 from json import JSONDecodeError
 from pathlib import Path
+from typing import Iterable
 
 
 PRIORITY_ORDER = {
@@ -49,7 +50,7 @@ def select_ready_issue(root: Path, ready_label: str) -> int | None:
     return int(ranked_issues[0]["number"])
 
 
-def ensure_open_issue(root: Path, issue_number: int) -> int:
+def ensure_open_issue(root: Path, issue_number: int, *, active_labels: Iterable[str] = ()) -> int:
     result = subprocess.run(
         [
             "gh",
@@ -57,7 +58,7 @@ def ensure_open_issue(root: Path, issue_number: int) -> int:
             "view",
             str(issue_number),
             "--json",
-            "number,state",
+            "number,state,labels",
         ],
         cwd=root,
         check=False,
@@ -75,6 +76,18 @@ def ensure_open_issue(root: Path, issue_number: int) -> int:
 
     if issue.get("state") != "OPEN":
         raise RuntimeError(f"issue #{issue_number} is not open")
+
+    label_names = {
+        label.get("name", "")
+        for label in issue.get("labels", [])
+        if isinstance(label, dict)
+    }
+    conflicting_labels = sorted(label for label in active_labels if label in label_names)
+    if conflicting_labels:
+        joined = ", ".join(conflicting_labels)
+        raise RuntimeError(
+            f"issue #{issue_number} already has active mission label(s): {joined}"
+        )
 
     return int(issue["number"])
 

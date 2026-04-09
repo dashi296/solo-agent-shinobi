@@ -132,7 +132,14 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 return 1
         else:
             try:
-                selected_issue = ensure_open_issue(root, selected_issue)
+                selected_issue = ensure_open_issue(
+                    root,
+                    selected_issue,
+                    active_labels=(
+                        config.labels["working"],
+                        config.labels["reviewing"],
+                    ),
+                )
             except RuntimeError as error:
                 print(f"run aborted: {error}")
                 return 1
@@ -159,8 +166,6 @@ def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int
         )
 
     if state.phase != "idle" and state.issue_number is not None:
-        if requested_issue == state.issue_number:
-            return None
         return (
             f"local mission state is active for issue #{state.issue_number} "
             f"(phase: {state.phase}); resume logic is not implemented yet"
