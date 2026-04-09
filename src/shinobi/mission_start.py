@@ -82,6 +82,24 @@ def start_mission(
     lease_expires_at = store.format_timestamp(
         started_at + timedelta(minutes=config.mission_lease_minutes)
     )
+    try:
+        post_start_comment(
+            root=root,
+            issue_number=issue_number,
+            branch=branch,
+            lease_expires_at=lease_expires_at,
+            config=config,
+            run_id=run_id,
+        )
+    except MissionStartError as error:
+        provisional_state.last_error = str(error)
+        save_retryable_state_or_raise(
+            store=store,
+            state=provisional_state,
+            base_message=str(error),
+        )
+        raise error
+
     active_state = State(
         issue_number=issue_number,
         pr_number=None,
@@ -216,6 +234,67 @@ def sync_start_labels(root: Path, issue_number: int, config: Config) -> None:
         if rollback_error is not None:
             message += f"; rollback also failed: {rollback_error}"
         raise MissionStartError(message) from error
+
+
+def post_start_comment(
+    *,
+    root: Path,
+    issue_number: int,
+    branch: str,
+    lease_expires_at: str,
+    config: Config,
+    run_id: str,
+) -> None:
+    client = GitHubClient(root, repo=config.repo)
+    comment = render_start_comment(
+        issue_number=issue_number,
+        branch=branch,
+        lease_expires_at=lease_expires_at,
+        agent_identity=config.agent_identity,
+        run_id=run_id,
+    )
+    try:
+        client.create_issue_comment(issue_number, comment)
+    except GitHubClientError as error:
+        rollback_error = transition_issue_to_needs_human(
+            root=root,
+            issue_number=issue_number,
+            config=config,
+            reason=(
+                "Shinobi failed to create the mission-state comment during start phase "
+                f"after updating active labels: {error}"
+            ),
+        )
+        message = (
+            f"failed to create mission-state comment on issue #{issue_number}: {error}"
+        )
+        if rollback_error is not None:
+            message += f"; rollback also failed: {rollback_error}"
+        raise MissionStartError(message) from error
+
+
+def render_start_comment(
+    *,
+    issue_number: int,
+    branch: str,
+    lease_expires_at: str,
+    agent_identity: str,
+    run_id: str,
+) -> str:
+    return (
+        "<!-- shinobi:mission-state\n"
+        f"issue: {issue_number}\n"
+        f"branch: {branch}\n"
+        "phase: start\n"
+        "pr: null\n"
+        f"lease_expires_at: {lease_expires_at}\n"
+        f"agent_identity: {agent_identity}\n"
+        f"run_id: {run_id}\n"
+        "-->\n"
+        "Shinobi Start\n\n"
+        f"任務 #{issue_number} に着手します。\n"
+        "- scope: issue body の要件内に限定\n"
+    )
 
 
 def transition_issue_to_needs_human(

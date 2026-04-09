@@ -775,6 +775,23 @@ class CliTest(unittest.TestCase):
         self.assertEqual(selected_issue, 15)
         self.assertEqual(run_mock.call_count, 2)
 
+    def test_select_ready_issue_uses_explicit_repo_override(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "api", "repos/configured/repo/issues"],
+            returncode=0,
+            stdout=json.dumps([{"number": 15, "labels": [{"name": "shinobi:ready"}]}]),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                selected_issue = cli.select_ready_issue(
+                    Path("/tmp/repo"), "shinobi:ready", repo="configured/repo"
+                )
+
+        self.assertEqual(selected_issue, 15)
+        self.assertIn("repos/configured/repo/issues", run_mock.call_args.args[0])
+
     def test_ensure_open_issue_rejects_closed_issue(self) -> None:
         result = subprocess.CompletedProcess(
             args=["gh", "api", "repos/owner/repo/issues/6"],
@@ -923,6 +940,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(issues[-1]["number"], 150)
         self.assertEqual(len(issues), 100)
 
+    def test_load_issue_uses_explicit_repo_override(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "api", "repos/configured/repo/issues/6"],
+            returncode=0,
+            stdout=json.dumps({"number": 6, "state": "open", "labels": []}),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                issue = cli.load_issue(Path("/tmp/repo"), 6, repo="configured/repo")
+
+        self.assertEqual(issue["number"], 6)
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["gh", "api", "repos/configured/repo/issues/6"],
+        )
+
     def test_acquire_lock_is_atomic_across_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1051,6 +1086,10 @@ class MissionStartTest(unittest.TestCase):
                     unittest.mock.call(26, remove=["shinobi:ready"]),
                 ],
             )
+            client.create_issue_comment.assert_called_once()
+            self.assertIn("<!-- shinobi:mission-state", client.create_issue_comment.call_args.args[1])
+            self.assertIn("phase: start", client.create_issue_comment.call_args.args[1])
+            self.assertIn("branch: feature/issue-26-task-run-start-phase", client.create_issue_comment.call_args.args[1])
 
     def test_start_mission_leaves_retryable_local_only_state_when_label_update_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1201,10 +1240,75 @@ class MissionStartTest(unittest.TestCase):
                     unittest.mock.call(26, remove=["shinobi:working"]),
                 ],
             )
-            client.create_issue_comment.assert_called_once()
+            self.assertEqual(client.create_issue_comment.call_count, 2)
             self.assertIn(
                 "failed to persist final local state during start phase",
-                client.create_issue_comment.call_args.args[1],
+                client.create_issue_comment.call_args_list[-1].args[1],
+            )
+
+    def test_start_mission_rolls_back_labels_when_start_comment_creation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+            store = StateStore(root)
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            run_id = "run-123"
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(
+                config=config,
+                run_id=run_id,
+                pid=123,
+                now=now,
+            )
+
+            with patch(
+                "shinobi.mission_start.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["git", "checkout", "-b", "feature/issue-26-task-run-start-phase"],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+            ):
+                with patch("shinobi.mission_start.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.create_issue_comment.side_effect = GitHubClientError("comment failed")
+                    with self.assertRaisesRegex(
+                        MissionStartError,
+                        "failed to create mission-state comment on issue #26",
+                    ):
+                        start_mission(
+                            root=root,
+                            store=store,
+                            config=config,
+                            run_id=run_id,
+                            issue={
+                                "number": 26,
+                                "title": "[TASK] run start phase を実装する",
+                                "labels": [{"name": "shinobi:ready"}],
+                                "state": "open",
+                            },
+                            now=now,
+                        )
+
+            state = store.load_state()
+            self.assertEqual(state.issue_number, 26)
+            self.assertTrue(state.retryable_local_only)
+            self.assertIn("failed to create mission-state comment", state.last_error or "")
+            self.assertEqual(
+                client.update_issue_labels.call_args_list,
+                [
+                    unittest.mock.call(26, add=["shinobi:working"]),
+                    unittest.mock.call(26, remove=["shinobi:ready"]),
+                    unittest.mock.call(26, add=["shinobi:needs-human"]),
+                    unittest.mock.call(26, remove=["shinobi:ready"]),
+                    unittest.mock.call(26, remove=["shinobi:working"]),
+                ],
             )
 
     def test_start_mission_surfaces_retryable_state_persist_failure_after_label_rollback(self) -> None:

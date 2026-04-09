@@ -134,6 +134,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                     config.labels["working"],
                     config.labels["reviewing"],
                 ),
+                repo=config.repo,
             )
         except RuntimeError as error:
             print(f"run aborted: {error}")
@@ -149,7 +150,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 )
                 return 1
             try:
-                selected_issue = select_ready_issue(root, config.labels["ready"])
+                selected_issue = select_ready_issue(root, config.labels["ready"], repo=config.repo)
             except RuntimeError as error:
                 print(f"run aborted: {error}")
                 return 1
@@ -172,13 +173,14 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                         config.labels["working"],
                         config.labels["reviewing"],
                     ),
+                    repo=config.repo,
                 )
             except RuntimeError as error:
                 print(f"run aborted: {error}")
                 return 1
 
         try:
-            issue = load_issue(root, selected_issue)
+            issue = load_issue(root, selected_issue, repo=config.repo)
             started_mission = start_mission(
                 root=root,
                 store=store,
