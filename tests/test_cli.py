@@ -187,6 +187,28 @@ class CliTest(unittest.TestCase):
             self.assertTrue(repaired_state.agent_identity)
             self.assertEqual(repaired_state.agent_identity, repaired_config["agent_identity"])
 
+    def test_init_repairs_conflicting_state_agent_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps({"repo": "owner/repo", "agent_identity": "config-id"}),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "state-id", "phase": "idle"}),
+                encoding="utf-8",
+            )
+
+            with patch("pathlib.Path.cwd", return_value=root):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            repaired_state = store.load_state()
+            self.assertEqual(repaired_state.agent_identity, "config-id")
+
     def test_status_warns_when_state_file_is_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -229,6 +251,33 @@ class CliTest(unittest.TestCase):
             self.assertIn("repo: unavailable", rendered)
             self.assertIn("warning: failed to load config:", rendered)
             self.assertIn("phase: idle", rendered)
+
+    def test_status_warns_when_agent_identity_files_diverge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps({"repo": "owner/repo", "agent_identity": "config-id"}),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "state-id", "phase": "idle"}),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with patch("pathlib.Path.cwd", return_value=root):
+                with redirect_stdout(output):
+                    exit_code = cli.main(["status"])
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn(
+                "warning: local state agent_identity does not match config;",
+                rendered,
+            )
+            self.assertIn("run `shinobi init` to repair it", rendered)
 
     def test_init_uses_git_workspace_root_from_subdirectory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

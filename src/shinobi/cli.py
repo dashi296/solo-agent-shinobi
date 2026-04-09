@@ -51,6 +51,11 @@ def command_status(root: Path) -> int:
     if config is not None:
         print(f"repo: {config.repo}")
         print(f"agent_identity: {config.agent_identity}")
+        if state is not None and state.agent_identity != config.agent_identity:
+            print(
+                "warning: local state agent_identity does not match config; "
+                "run `shinobi init` to repair it"
+            )
     else:
         print("repo: unavailable")
         print(f"agent_identity: {state.agent_identity if state is not None else 'unavailable'}")

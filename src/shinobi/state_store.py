@@ -104,6 +104,10 @@ class StateStore:
                 state.agent_identity = config.agent_identity
                 self.save_state(state)
 
+        if state.agent_identity != config.agent_identity:
+            state.agent_identity = config.agent_identity
+            self.save_state(state)
+
         if not self.paths.summary_path.exists():
             self.paths.summary_path.write_text(SUMMARY_TEMPLATE, encoding="utf-8")
         if not self.paths.decisions_path.exists():
