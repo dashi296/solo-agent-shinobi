@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import discover_workspace_root
-from .issue_selector import ensure_open_issue, select_ready_issue
+from .issue_selector import ensure_open_issue, list_open_issues_with_any_label, select_ready_issue
 from .models import State
 from .state_store import StateStore
 
@@ -120,8 +120,23 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
             print(f"run aborted: {conflict}")
             return 1
 
+        active_issue_numbers = list_open_issues_with_any_label(
+            root,
+            (
+                config.labels["working"],
+                config.labels["reviewing"],
+            ),
+        )
+
         selected_issue = issue_number
         if selected_issue is None:
+            if active_issue_numbers:
+                rendered = ", ".join(f"#{number}" for number in active_issue_numbers)
+                print(
+                    "run aborted: active GitHub mission exists for "
+                    f"{rendered}; recovery/resume is not implemented yet"
+                )
+                return 1
             try:
                 selected_issue = select_ready_issue(root, config.labels["ready"])
             except RuntimeError as error:
@@ -131,15 +146,18 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 print(f"run aborted: no open issues labeled {config.labels['ready']}")
                 return 1
         else:
-            try:
-                selected_issue = ensure_open_issue(
-                    root,
-                    selected_issue,
-                    active_labels=(
-                        config.labels["working"],
-                        config.labels["reviewing"],
-                    ),
+            conflicting_active_issues = [
+                number for number in active_issue_numbers if number != selected_issue
+            ]
+            if conflicting_active_issues:
+                rendered = ", ".join(f"#{number}" for number in conflicting_active_issues)
+                print(
+                    "run aborted: another active GitHub mission exists for "
+                    f"{rendered}; targeted resume/cancel is not implemented yet"
                 )
+                return 1
+            try:
+                selected_issue = ensure_open_issue(root, selected_issue)
             except RuntimeError as error:
                 print(f"run aborted: {error}")
                 return 1
@@ -166,6 +184,8 @@ def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int
         )
 
     if state.phase != "idle" and state.issue_number is not None:
+        if requested_issue == state.issue_number:
+            return None
         return (
             f"local mission state is active for issue #{state.issue_number} "
             f"(phase: {state.phase}); resume logic is not implemented yet"
