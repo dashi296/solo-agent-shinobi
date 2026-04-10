@@ -23,7 +23,7 @@ GitHub Actions
   └─ lint / typecheck / test / build
 ```
 
-## ローカル state
+## ローカル領域
 
 使用予定のローカル領域:
 
@@ -33,12 +33,18 @@ GitHub Actions
   state.json
   summary.md
   decisions.md
+  review-notes.md
   run.lock
+  templates/
+    self-review.md
+    review-note-rule.md
   logs/
   cache/
 ```
 
-MVP foundations では設定を `.shinobi/config.json` に保持します。
+MVP foundations では設定を `.shinobi/config.json` に保持します。`.shinobi/` 配下には mission 復元に使う `state` と、再発防止ルールを保持する `knowledge` を置きます。
+
+knowledge / template の配布元は追跡対象のパッケージ内に置き、`shinobi init` が workspace の `.shinobi/` 配下へコピーします。`.shinobi/` 自体は引き続きローカル生成物です。
 
 ### `.shinobi/state.json`
 
