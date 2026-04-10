@@ -2113,7 +2113,15 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(config.verification_commands["test"], ["python3", "-m", "unittest"])
         self.assertEqual(
             config.verification_commands["typecheck"],
-            ["python3", "-m", "compileall", "src", "tests"],
+            [
+                "env",
+                "PYTHONPYCACHEPREFIX=/tmp/pycache",
+                "python3",
+                "-m",
+                "compileall",
+                "src",
+                "tests",
+            ],
         )
 
 

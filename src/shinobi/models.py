@@ -6,7 +6,15 @@ from typing import Any, Dict, List, Optional
 
 DEFAULT_VERIFICATION_COMMANDS = {
     "lint": [],
-    "typecheck": ["python3", "-m", "compileall", "src", "tests"],
+    "typecheck": [
+        "env",
+        "PYTHONPYCACHEPREFIX=/tmp/pycache",
+        "python3",
+        "-m",
+        "compileall",
+        "src",
+        "tests",
+    ],
     "test": ["python3", "-m", "unittest", "tests.test_cli"],
 }
 
