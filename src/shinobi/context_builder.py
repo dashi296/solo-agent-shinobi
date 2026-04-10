@@ -28,6 +28,19 @@ HIGH_RISK_WORDS = (
     "必要に応じて広く",
 )
 LOCAL_KNOWLEDGE_PATHS = {".shinobi/summary.md", ".shinobi/decisions.md"}
+CANDIDATE_SOURCE_SECTIONS = (
+    "purpose",
+    "requirements",
+    "completion_criteria",
+    "notes",
+)
+REFERENCE_SOURCE_SECTIONS = (
+    "purpose",
+    "requirements",
+    "completion_criteria",
+    "notes",
+    "targets",
+)
 
 
 @dataclass(frozen=True)
@@ -55,9 +68,20 @@ def build_mission_context(root: Path, issue: dict) -> MissionContext:
 
     summary = read_optional_text(store.paths.summary_path)
     decisions = read_optional_text(store.paths.decisions_path)
-    issue_paths = extract_candidate_files(body)
+    issue_paths = extract_paths_from_sections(
+        sections,
+        keys=REFERENCE_SOURCE_SECTIONS,
+        fallback=body,
+    )
     target_paths = extract_candidate_files("\n".join(sections.get("targets", [])))
-    candidate_files = filter_local_knowledge_paths(target_paths or issue_paths)
+    fallback_candidate_paths = extract_paths_from_sections(
+        sections,
+        keys=CANDIDATE_SOURCE_SECTIONS,
+        fallback=body,
+    )
+    candidate_files = filter_local_knowledge_paths(
+        target_paths or fallback_candidate_paths
+    )
     reference_files = unique_items(
         [
             ".shinobi/summary.md",
@@ -182,6 +206,13 @@ def extract_candidate_files(body: str) -> list[str]:
         candidates.append(path)
 
     return unique_items(candidates)
+
+
+def extract_paths_from_sections(
+    sections: dict[str, list[str]], *, keys: tuple[str, ...], fallback: str
+) -> list[str]:
+    selected_text = "\n".join(item for key in keys for item in sections.get(key, []))
+    return extract_candidate_files(selected_text or fallback)
 
 
 def filter_local_knowledge_paths(paths: list[str]) -> list[str]:

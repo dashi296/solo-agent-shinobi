@@ -1807,6 +1807,35 @@ class ContextBuilderTest(unittest.TestCase):
             "issue body does not name candidate files",
         )
 
+    def test_build_mission_context_ignores_scope_out_paths_as_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 99,
+                    "title": "Scoped task",
+                    "body": (
+                        "## 目的\n"
+                        "小さな修正を行う\n\n"
+                        "## スコープ外\n"
+                        "- `src/shinobi/context_builder.py` は変更しない\n\n"
+                        "## 禁止事項\n"
+                        "- `docs/architecture.md` を編集しない\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.candidate_files, [])
+        self.assertEqual(
+            context.reference_files,
+            [".shinobi/summary.md", ".shinobi/decisions.md"],
+        )
+        self.assertTrue(context.needs_human_review)
+        self.assertEqual(
+            context.needs_human_review_reason,
+            "issue body does not name candidate files",
+        )
+
     def test_build_mission_context_does_not_flag_negative_repo_wide_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             context = build_mission_context(
