@@ -74,21 +74,39 @@ def publish_mission(
         published_at + timedelta(minutes=config.mission_lease_minutes)
     )
 
-    sync_publish_labels(
-        client=client,
-        issue_number=issue_number,
-        config=config,
-        current_label_names=issue_label_names,
-    )
-    upsert_publish_comment(
-        client=client,
-        issue_number=issue_number,
-        branch=branch,
-        pr_number=pr_number,
-        lease_expires_at=lease_expires_at,
-        agent_identity=config.agent_identity,
-        run_id=run_id,
-    )
+    publish_label_names = issue_label_names | {config.labels["reviewing"]}
+    try:
+        sync_publish_labels(
+            client=client,
+            issue_number=issue_number,
+            config=config,
+            current_label_names=issue_label_names,
+        )
+        upsert_publish_comment(
+            client=client,
+            issue_number=issue_number,
+            branch=branch,
+            pr_number=pr_number,
+            lease_expires_at=lease_expires_at,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
+        )
+    except MissionPublishError as error:
+        rollback_error = transition_publish_failure_to_needs_human(
+            client=client,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            config=config,
+            reason=(
+                "Shinobi failed to complete publish phase after creating or updating "
+                f"PR #{pr_number}: {error}"
+            ),
+            known_label_names=publish_label_names,
+        )
+        message = str(error)
+        if rollback_error is not None:
+            message += f"; failed to hand off publish failure: {rollback_error}"
+        raise MissionPublishError(message) from error
 
     published_state = State(
         issue_number=issue_number,
@@ -106,10 +124,24 @@ def publish_mission(
     try:
         store.save_state(published_state)
     except OSError as error:
-        raise MissionPublishError(
+        rollback_error = transition_publish_failure_to_needs_human(
+            client=client,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            config=config,
+            reason=(
+                "Shinobi failed to persist final local state during publish phase "
+                f"after updating PR #{pr_number}: {error}"
+            ),
+            known_label_names=publish_label_names,
+        )
+        message = (
             "GitHub PR, labels, and mission-state comment were updated but final "
             f"local state persistence failed for issue #{issue_number}: {error}"
-        ) from error
+        )
+        if rollback_error is not None:
+            message += f"; failed to hand off publish failure: {rollback_error}"
+        raise MissionPublishError(message) from error
 
     return PublishedMission(
         issue_number=issue_number,
@@ -298,6 +330,35 @@ def sync_publish_labels(
         raise MissionPublishError(
             f"failed to normalize publish labels for issue #{issue_number}: {error}"
         ) from error
+
+
+def transition_publish_failure_to_needs_human(
+    *,
+    client: GitHubClient,
+    issue_number: int,
+    pr_number: int,
+    config: Config,
+    reason: str,
+    known_label_names: set[str],
+) -> str | None:
+    needs_human_label = config.labels["needs_human"]
+    removable_labels = labels_to_remove_for_transition(
+        config=config,
+        current_label_names=known_label_names | {needs_human_label},
+        target_label=needs_human_label,
+    )
+
+    try:
+        client.update_issue_labels(issue_number, add=[needs_human_label])
+        if removable_labels:
+            client.update_issue_labels(issue_number, remove=removable_labels)
+        client.create_issue_comment(
+            issue_number,
+            f"{reason}\n\nPR: #{pr_number}\n",
+        )
+    except GitHubClientError as error:
+        return str(error)
+    return None
 
 
 def upsert_publish_comment(

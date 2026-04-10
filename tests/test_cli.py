@@ -1966,6 +1966,156 @@ class MissionPublishTest(unittest.TestCase):
             client.update_pull_request.assert_called_once()
             client.create_issue_comment.assert_called_once()
 
+    def test_publish_mission_hands_off_when_publish_label_cleanup_fails(self) -> None:
+        store = Mock()
+        store.format_timestamp.return_value = "2026-04-09T00:30:00Z"
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 31,
+                    "labels": [
+                        {"name": "shinobi:ready"},
+                        {"name": "shinobi:working"},
+                    ],
+                }
+                client.list_pull_requests_by_head.return_value = []
+                client.create_pull_request.return_value = {
+                    "number": 44,
+                    "url": "https://github.com/owner/repo/pull/44",
+                }
+                client.update_issue_labels.side_effect = [
+                    None,
+                    GitHubClientError("remove failed"),
+                    None,
+                    None,
+                ]
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "failed to normalize publish labels for issue #31",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:reviewing"]),
+                unittest.mock.call(31, remove=["shinobi:ready", "shinobi:working"]),
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(
+                    31,
+                    remove=["shinobi:ready", "shinobi:reviewing", "shinobi:working"],
+                ),
+            ],
+        )
+        client.create_issue_comment.assert_called_once()
+        self.assertIn(
+            "failed to complete publish phase",
+            client.create_issue_comment.call_args.args[1],
+        )
+        self.assertIn("PR: #44", client.create_issue_comment.call_args.args[1])
+        client.list_issue_comments.assert_not_called()
+        store.save_state.assert_not_called()
+
+    def test_publish_mission_hands_off_when_final_state_save_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps({"repo": "owner/repo", "agent_identity": "agent-1"}),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "agent-1", "phase": "idle"}),
+                encoding="utf-8",
+            )
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id="run-123", pid=123, now=now)
+            state = cli.State(
+                issue_number=31,
+                branch="feature/issue-31-publish-phase",
+                agent_identity="agent-1",
+                run_id="run-123",
+                phase="start",
+            )
+            execution_result = ExecutionResult(
+                commands=[],
+                change_summary="Published mission changes.",
+            )
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.get_issue.return_value = {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    }
+                    client.list_pull_requests_by_head.return_value = []
+                    client.create_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                    }
+                    client.list_issue_comments.return_value = []
+                    with patch.object(store, "save_state", side_effect=OSError("disk full")):
+                        with self.assertRaisesRegex(
+                            MissionPublishError,
+                            "final local state persistence failed for issue #31: disk full",
+                        ):
+                            publish_mission(
+                                root=root,
+                                store=store,
+                                config=config,
+                                run_id="run-123",
+                                state=state,
+                                execution_result=execution_result,
+                                now=now,
+                            )
+
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:reviewing"]),
+                unittest.mock.call(31, remove=["shinobi:working"]),
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(31, remove=["shinobi:reviewing", "shinobi:working"]),
+            ],
+        )
+        self.assertEqual(client.create_issue_comment.call_count, 2)
+        self.assertIn(
+            "failed to persist final local state during publish phase",
+            client.create_issue_comment.call_args_list[-1].args[1],
+        )
+
     def test_publish_mission_rejects_non_start_state(self) -> None:
         with self.assertRaisesRegex(
             MissionPublishError,
