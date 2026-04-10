@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from shinobi import cli
 from shinobi.config import discover_repo_slug
+from shinobi.context_builder import build_mission_context
 from shinobi.github_client import GitHubClient, GitHubClientError
 from shinobi.mission_start import (
     MissionStartError,
@@ -1693,6 +1694,315 @@ class MissionStartTest(unittest.TestCase):
                     },
                     now=now,
                 )
+
+
+class ContextBuilderTest(unittest.TestCase):
+    def test_build_mission_context_reads_issue_and_local_knowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.summary_path.write_text("summary text\n", encoding="utf-8")
+            store.paths.decisions_path.write_text("decision text\n", encoding="utf-8")
+
+            context = build_mission_context(
+                root,
+                {
+                    "number": 28,
+                    "title": "[TASK] context_builder を実装する",
+                    "body": (
+                        "## 目的\n"
+                        "Issue とローカル知識から最小実行コンテキストを生成する。\n\n"
+                        "## 対象\n"
+                        "- `src/shinobi/context_builder.py`\n"
+                        "- `tests/test_cli.py`\n\n"
+                        "## 要件\n"
+                        "- Issue 本文を読む\n"
+                        "- `.shinobi/summary.md` を読む\n\n"
+                        "## 完了条件\n"
+                        "- context builder が構造化データを返す\n\n"
+                        "## スコープ外\n"
+                        "- AI 実装エージェント呼び出し\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.issue_number, 28)
+        self.assertEqual(
+            context.mission_summary,
+            "Issue とローカル知識から最小実行コンテキストを生成する。",
+        )
+        self.assertEqual(
+            context.candidate_files,
+            [
+                "src/shinobi/context_builder.py",
+                "tests/test_cli.py",
+            ],
+        )
+        self.assertEqual(
+            context.reference_files,
+            [
+                ".shinobi/summary.md",
+                ".shinobi/decisions.md",
+                "src/shinobi/context_builder.py",
+                "tests/test_cli.py",
+            ],
+        )
+        self.assertEqual(context.summary, "summary text\n")
+        self.assertEqual(context.decisions, "decision text\n")
+        self.assertEqual(
+            context.completion_criteria,
+            ["context builder が構造化データを返す"],
+        )
+        self.assertEqual(
+            context.prohibited_actions,
+            ["Do not include: AI 実装エージェント呼び出し"],
+        )
+        self.assertFalse(context.needs_human_review)
+
+    def test_build_mission_context_treats_missing_knowledge_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": "## 対象\n- `src/shinobi/context_builder.py`\n",
+                },
+            )
+
+        self.assertEqual(context.summary, "")
+        self.assertEqual(context.decisions, "")
+        self.assertEqual(context.mission_summary, "Context task")
+
+    def test_build_mission_context_excludes_local_knowledge_from_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": "## 要件\n- `.shinobi/summary.md` を読む\n- `docs/mvp-design.md` を読む\n",
+                },
+            )
+
+        self.assertEqual(context.candidate_files, ["docs/mvp-design.md"])
+        self.assertIn(".shinobi/summary.md", context.reference_files)
+
+    def test_build_mission_context_excludes_relative_local_knowledge_from_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 要件\n"
+                        "- `./.shinobi/summary.md` を読む\n"
+                        "- `./docs/mvp-design.md` を読む\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.candidate_files, ["docs/mvp-design.md"])
+        self.assertEqual(
+            context.reference_files,
+            [
+                ".shinobi/summary.md",
+                ".shinobi/decisions.md",
+                "docs/mvp-design.md",
+            ],
+        )
+
+    def test_build_mission_context_falls_back_when_targets_are_only_local_knowledge(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 対象\n"
+                        "- `.shinobi/summary.md`\n\n"
+                        "## 要件\n"
+                        "- `src/shinobi/context_builder.py` を更新\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.candidate_files, ["src/shinobi/context_builder.py"])
+        self.assertFalse(context.needs_human_review)
+
+    def test_build_mission_context_keeps_repeated_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 要件\n"
+                        "- `src/shinobi/context_builder.py` を追加\n\n"
+                        "## 要件\n"
+                        "- `tests/test_cli.py` を更新\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(
+            context.requirements,
+            [
+                "`src/shinobi/context_builder.py` を追加",
+                "`tests/test_cli.py` を更新",
+            ],
+        )
+        self.assertEqual(
+            context.candidate_files,
+            [
+                "src/shinobi/context_builder.py",
+                "tests/test_cli.py",
+            ],
+        )
+
+    def test_build_mission_context_flags_missing_candidate_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 99,
+                    "title": "Broad task",
+                    "body": "## 目的\nいい感じに直す\n",
+                },
+            )
+
+        self.assertEqual(context.candidate_files, [])
+        self.assertTrue(context.needs_human_review)
+        self.assertEqual(
+            context.needs_human_review_reason,
+            "issue body does not name candidate files",
+        )
+
+    def test_build_mission_context_does_not_fallback_to_scope_out_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 99,
+                    "title": "Scoped task",
+                    "body": (
+                        "## スコープ外\n"
+                        "- `src/shinobi/context_builder.py` は変更しない\n\n"
+                        "## 禁止事項\n"
+                        "- `docs/architecture.md` を編集しない\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.candidate_files, [])
+        self.assertEqual(
+            context.reference_files,
+            [".shinobi/summary.md", ".shinobi/decisions.md"],
+        )
+        self.assertTrue(context.needs_human_review)
+        self.assertEqual(
+            context.needs_human_review_reason,
+            "issue body does not name candidate files",
+        )
+
+    def test_build_mission_context_ignores_scope_out_paths_as_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 99,
+                    "title": "Scoped task",
+                    "body": (
+                        "## 目的\n"
+                        "小さな修正を行う\n\n"
+                        "## スコープ外\n"
+                        "- `src/shinobi/context_builder.py` は変更しない\n\n"
+                        "## 禁止事項\n"
+                        "- `docs/architecture.md` を編集しない\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.candidate_files, [])
+        self.assertEqual(
+            context.reference_files,
+            [".shinobi/summary.md", ".shinobi/decisions.md"],
+        )
+        self.assertTrue(context.needs_human_review)
+        self.assertEqual(
+            context.needs_human_review_reason,
+            "issue body does not name candidate files",
+        )
+
+    def test_build_mission_context_does_not_flag_negative_repo_wide_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 対象\n"
+                        "- `src/shinobi/context_builder.py`\n\n"
+                        "## 完了条件\n"
+                        "- repo 全体を読まない前提がコードで守られている\n"
+                    ),
+                },
+            )
+
+        self.assertFalse(context.needs_human_review)
+        self.assertIsNone(context.needs_human_review_reason)
+
+    def test_build_mission_context_does_not_flag_scope_out_broad_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 対象\n"
+                        "- `src/shinobi/context_builder.py`\n\n"
+                        "## スコープ外\n"
+                        "- repo 全体を変更すること\n"
+                    ),
+                },
+            )
+
+        self.assertFalse(context.needs_human_review)
+        self.assertIsNone(context.needs_human_review_reason)
+        self.assertEqual(
+            context.prohibited_actions,
+            ["Do not include: repo 全体を変更すること"],
+        )
+
+    def test_build_mission_context_flags_explicit_broad_scope_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 99,
+                    "title": "Broad task",
+                    "body": (
+                        "## 対象\n"
+                        "- `src/shinobi/context_builder.py`\n\n"
+                        "## 注意点\n"
+                        "- repository-wide cleanup を含む\n"
+                    ),
+                },
+            )
+
+        self.assertTrue(context.needs_human_review)
+        self.assertEqual(
+            context.needs_human_review_reason,
+            "issue body contains broad scope marker: repository-wide",
+        )
 
 
 class GitHubClientTest(unittest.TestCase):
