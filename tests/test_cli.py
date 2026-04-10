@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,8 +45,43 @@ class CliTest(unittest.TestCase):
             self.assertTrue(store.paths.state_path.exists())
             self.assertTrue(store.paths.summary_path.exists())
             self.assertTrue(store.paths.decisions_path.exists())
+            self.assertTrue(store.paths.review_notes_path.exists())
+            self.assertTrue(store.paths.self_review_template_path.exists())
+            self.assertTrue(store.paths.review_note_rule_template_path.exists())
             self.assertTrue(store.paths.lock_path.exists())
             self.assertIn("Initialized Shinobi", output.getvalue())
+
+    def test_init_does_not_overwrite_existing_workspace_templates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.templates_dir.mkdir()
+            store.paths.review_notes_path.write_text("# custom notes\n", encoding="utf-8")
+            store.paths.self_review_template_path.write_text("# custom self review\n", encoding="utf-8")
+            store.paths.review_note_rule_template_path.write_text(
+                "# custom review rule\n",
+                encoding="utf-8",
+            )
+
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        exit_code = cli.main(["init"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                store.paths.review_notes_path.read_text(encoding="utf-8"),
+                "# custom notes\n",
+            )
+            self.assertEqual(
+                store.paths.self_review_template_path.read_text(encoding="utf-8"),
+                "# custom self review\n",
+            )
+            self.assertEqual(
+                store.paths.review_note_rule_template_path.read_text(encoding="utf-8"),
+                "# custom review rule\n",
+            )
 
     def test_status_requires_init(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1966,21 +2003,70 @@ class GitHubClientTest(unittest.TestCase):
 
     def test_packaging_declares_shinobi_package(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            wheel_dir = Path(tmp_dir)
+            temp_root = Path(tmp_dir)
             project_root = Path(__file__).resolve().parents[1]
-            with patch("pathlib.Path.cwd", return_value=project_root):
-                with patch.object(sys, "argv", ["pip", "wheel", ".", "--no-deps", "--no-build-isolation", "-w", str(wheel_dir)]):
-                    import pip._internal.cli.main as pip_main
+            packaged_project = temp_root / "repo"
+            wheel_dir = temp_root / "wheel"
+            extract_dir = temp_root / "extract"
+            workspace = temp_root / "workspace"
+            shutil.copytree(
+                project_root,
+                packaged_project,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".pytest_cache"),
+            )
+            wheel_dir.mkdir()
+            workspace.mkdir()
 
-                    exit_code = pip_main.main()
+            original_cwd = Path.cwd()
+            try:
+                with patch("pathlib.Path.cwd", return_value=packaged_project):
+                    with patch.object(
+                        sys,
+                        "argv",
+                        ["pip", "wheel", ".", "--no-deps", "--no-build-isolation", "-w", str(wheel_dir)],
+                    ):
+                        import pip._internal.cli.main as pip_main
+
+                        os.chdir(packaged_project)
+                        exit_code = pip_main.main()
+            finally:
+                os.chdir(original_cwd)
 
             self.assertEqual(exit_code, 0)
             wheel_path = next(wheel_dir.glob("*.whl"))
             with zipfile.ZipFile(wheel_path) as wheel:
                 names = wheel.namelist()
+                wheel.extractall(extract_dir)
 
             self.assertTrue(any(name.startswith("shinobi/") for name in names))
             self.assertTrue(any(name.endswith(".dist-info/entry_points.txt") for name in names))
+            self.assertIn("shinobi/bootstrap_templates/review-notes.md", names)
+            self.assertIn("shinobi/bootstrap_templates/self-review.md", names)
+            self.assertIn("shinobi/bootstrap_templates/review-note-rule.md", names)
+
+            check_code = """
+from pathlib import Path
+from unittest.mock import patch
+from shinobi.state_store import StateStore
+
+workspace = Path(r\"\"\"{workspace}\"\"\")
+workspace.mkdir(exist_ok=True)
+with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+    StateStore(workspace).initialize()
+assert (workspace / ".shinobi" / "review-notes.md").exists()
+assert (workspace / ".shinobi" / "templates" / "self-review.md").exists()
+assert (workspace / ".shinobi" / "templates" / "review-note-rule.md").exists()
+""".format(workspace=workspace)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(extract_dir)
+            result = subprocess.run(
+                [sys.executable, "-c", check_code],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_discover_repo_slug_normalizes_ssh_url(self) -> None:
         with patch("subprocess.run", return_value=Mock(stdout="ssh://git@github.com/owner/repo.git\n")):

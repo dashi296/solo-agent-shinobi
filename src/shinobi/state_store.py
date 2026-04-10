@@ -4,6 +4,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from importlib import resources
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Tuple
@@ -33,6 +34,13 @@ DECISIONS_TEMPLATE = """# Shinobi Decisions
 """
 
 
+BOOTSTRAP_TEMPLATE_FILES = {
+    "review-notes.md": "review-notes.md",
+    "self-review.md": "templates/self-review.md",
+    "review-note-rule.md": "templates/review-note-rule.md",
+}
+
+
 @dataclass
 class WorkspacePaths:
     root: Path
@@ -60,6 +68,22 @@ class WorkspacePaths:
     @property
     def lock_path(self) -> Path:
         return self.shinobi_dir / "run.lock"
+
+    @property
+    def review_notes_path(self) -> Path:
+        return self.shinobi_dir / "review-notes.md"
+
+    @property
+    def templates_dir(self) -> Path:
+        return self.shinobi_dir / "templates"
+
+    @property
+    def self_review_template_path(self) -> Path:
+        return self.templates_dir / "self-review.md"
+
+    @property
+    def review_note_rule_template_path(self) -> Path:
+        return self.templates_dir / "review-note-rule.md"
 
     @property
     def logs_dir(self) -> Path:
@@ -121,10 +145,30 @@ class StateStore:
             self.paths.decisions_path.write_text(DECISIONS_TEMPLATE, encoding="utf-8")
         if not self.paths.lock_path.exists():
             self.paths.lock_path.write_text("", encoding="utf-8")
+        self.initialize_workspace_templates()
 
         self.ensure_shinobi_ignored()
 
         return config, state
+
+    def initialize_workspace_templates(self) -> None:
+        self.paths.templates_dir.mkdir(exist_ok=True)
+        for source_name, relative_target in BOOTSTRAP_TEMPLATE_FILES.items():
+            target_path = self.paths.shinobi_dir / relative_target
+            if target_path.exists():
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(self.read_bootstrap_template(source_name), encoding="utf-8")
+
+    def read_bootstrap_template(self, source_name: str) -> str:
+        try:
+            return (
+                resources.files("shinobi.bootstrap_templates")
+                .joinpath(source_name)
+                .read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, ModuleNotFoundError) as error:
+            raise RuntimeError(f"missing bundled bootstrap template: {source_name}") from error
 
     def ensure_shinobi_ignored(self) -> None:
         exclude_path = self.resolve_git_info_exclude_path()
