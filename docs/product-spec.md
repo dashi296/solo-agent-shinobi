@@ -356,6 +356,8 @@ max_token_budget: 40000
 
 high-risk path は context で候補抽出し、execute 完了前に publish 可否を最終判定します。publish 前に確定した場合でも、human handoff に必要な差分があるなら branch を push し、原則 draft PR を作成または更新してから `shinobi:needs-human` か `shinobi:blocked` へ遷移します。この pre-publish stop で PR を作成または更新した場合も、machine-readable な mission-state comment は同じ mission の comment を upsert し、最新の `pr`, `phase`, `lease_expires_at` を反映して recovery と整合させます。差分が無いか共有価値が無い場合だけ PR を作らず停止します。publish 後に review で追加検知した場合は PR を残したまま `shinobi:needs-human` へ遷移します。
 
+publish 直前に現在の Issue がすでに `shinobi:blocked` または `shinobi:needs-human` を持つ場合は、人手の停止判断を優先し、push / PR 作成前に publish を中止します。
+
 ## Interrupted Run Recovery
 
 MVP では interrupted run からの回復を手動 cleanup 前提にしません。

@@ -12,6 +12,7 @@ from .models import Config, ExecutionResult, State, VerificationCommandResult
 from .state_store import StateStore
 
 MISSION_STATE_MARKER = "<!-- shinobi:mission-state"
+BLOCKING_PUBLISH_LABEL_KEYS = ("blocked", "needs_human")
 
 
 class MissionPublishError(RuntimeError):
@@ -51,9 +52,15 @@ def publish_mission(
         now=published_at,
     )
 
+    client = GitHubClient(root, repo=config.repo)
+    issue_label_names = load_publishable_issue_label_names(
+        client=client,
+        issue_number=issue_number,
+        config=config,
+    )
+
     push_branch(root, branch)
 
-    client = GitHubClient(root, repo=config.repo)
     pr = create_or_update_pull_request(
         client=client,
         config=config,
@@ -67,7 +74,12 @@ def publish_mission(
         published_at + timedelta(minutes=config.mission_lease_minutes)
     )
 
-    sync_publish_labels(client=client, issue_number=issue_number, config=config)
+    sync_publish_labels(
+        client=client,
+        issue_number=issue_number,
+        config=config,
+        current_label_names=issue_label_names,
+    )
     upsert_publish_comment(
         client=client,
         issue_number=issue_number,
@@ -177,6 +189,35 @@ def push_branch(root: Path, branch: str) -> None:
         raise MissionPublishError(f"failed to push branch {branch}: {message}")
 
 
+def load_publishable_issue_label_names(
+    *,
+    client: GitHubClient,
+    issue_number: int,
+    config: Config,
+) -> set[str]:
+    try:
+        issue = client.get_issue(issue_number)
+    except GitHubClientError as error:
+        raise MissionPublishError(
+            f"failed to load issue #{issue_number} before publish: {error}"
+        ) from error
+
+    label_names = get_issue_label_names(issue)
+    blocking_labels = sorted(
+        config.labels[key]
+        for key in BLOCKING_PUBLISH_LABEL_KEYS
+        if key in config.labels and config.labels[key] in label_names
+    )
+    if blocking_labels:
+        joined = ", ".join(blocking_labels)
+        raise MissionPublishError(
+            f"publish phase cannot proceed because issue #{issue_number} "
+            f"has blocking label(s): {joined}"
+        )
+
+    return label_names
+
+
 def create_or_update_pull_request(
     *,
     client: GitHubClient,
@@ -235,11 +276,10 @@ def sync_publish_labels(
     client: GitHubClient,
     issue_number: int,
     config: Config,
+    current_label_names: set[str],
 ) -> None:
     reviewing_label = config.labels["reviewing"]
     try:
-        issue = client.get_issue(issue_number)
-        current_label_names = get_issue_label_names(issue)
         removable_labels = labels_to_remove_for_transition(
             config=config,
             current_label_names=current_label_names | {reviewing_label},

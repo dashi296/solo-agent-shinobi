@@ -1857,7 +1857,6 @@ class MissionPublishTest(unittest.TestCase):
                         "labels": [
                             {"name": "shinobi:ready"},
                             {"name": "shinobi:working"},
-                            {"name": "shinobi:blocked"},
                             {"name": "shinobi:risky"},
                         ],
                     }
@@ -1894,7 +1893,7 @@ class MissionPublishTest(unittest.TestCase):
                     unittest.mock.call(31, add=["shinobi:reviewing"]),
                     unittest.mock.call(
                         31,
-                        remove=["shinobi:blocked", "shinobi:ready", "shinobi:working"],
+                        remove=["shinobi:ready", "shinobi:working"],
                     ),
                 ],
             )
@@ -2028,6 +2027,46 @@ class MissionPublishTest(unittest.TestCase):
 
         run_mock.assert_not_called()
         store.require_lock_owner.assert_not_called()
+
+    def test_publish_mission_rejects_blocking_issue_label_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 31,
+                    "labels": [{"name": "shinobi:needs-human"}],
+                }
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "has blocking label\\(s\\): shinobi:needs-human",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        run_mock.assert_not_called()
+        client.get_pull_request.assert_not_called()
+        client.create_pull_request.assert_not_called()
 
     def test_publish_mission_rejects_state_from_different_run_before_push(self) -> None:
         store = Mock()
