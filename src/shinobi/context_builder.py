@@ -65,7 +65,7 @@ def build_mission_context(root: Path, issue: dict) -> MissionContext:
             *issue_paths,
         ]
     )
-    needs_human_review_reason = broad_scope_reason(body, candidate_files)
+    needs_human_review_reason = broad_scope_reason(sections, candidate_files)
 
     return MissionContext(
         issue_number=int(issue["number"]),
@@ -204,13 +204,20 @@ def derive_prohibited_actions(sections: dict[str, list[str]]) -> list[str]:
     return unique_items(prohibited)
 
 
-def broad_scope_reason(body: str, candidate_files: list[str]) -> str | None:
+def broad_scope_reason(
+    sections: dict[str, list[str]], candidate_files: list[str]
+) -> str | None:
     if not candidate_files:
         return "issue body does not name candidate files"
 
-    lowered_body = body.lower()
+    scope_text = "\n".join(
+        item
+        for key in ("purpose", "requirements", "targets", "notes")
+        for item in sections.get(key, [])
+    )
+    lowered_scope_text = scope_text.lower()
     for word in HIGH_RISK_WORDS:
-        if word.lower() in lowered_body:
+        if word.lower() in lowered_scope_text:
             return f"issue body contains broad scope marker: {word}"
 
     return None
