@@ -10,12 +10,19 @@ from typing import List, Optional
 from .config import discover_workspace_root
 from .issue_selector import (
     ensure_open_issue,
+    load_issue,
     list_open_issues,
     list_open_issues_with_any_label,
     select_ready_issue,
 )
+from .mission_start import MissionStartError, handoff_started_mission, start_mission
 from .models import State
 from .state_store import StateStore
+
+CONTEXT_PHASE_NOT_IMPLEMENTED_REASON = (
+    "Shinobi completed the start phase, but the context phase is not implemented yet. "
+    "Handing off this mission for manual follow-up."
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,6 +139,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                     config.labels["working"],
                     config.labels["reviewing"],
                 ),
+                repo=config.repo,
             )
         except RuntimeError as error:
             print(f"run aborted: {error}")
@@ -147,7 +155,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 )
                 return 1
             try:
-                selected_issue = select_ready_issue(root, config.labels["ready"])
+                selected_issue = select_ready_issue(root, config.labels["ready"], repo=config.repo)
             except RuntimeError as error:
                 print(f"run aborted: {error}")
                 return 1
@@ -170,10 +178,33 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                         config.labels["working"],
                         config.labels["reviewing"],
                     ),
+                    repo=config.repo,
                 )
             except RuntimeError as error:
                 print(f"run aborted: {error}")
                 return 1
+
+        try:
+            issue = load_issue(root, selected_issue, repo=config.repo)
+            started_mission = start_mission(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                issue=issue,
+                now=now,
+            )
+            handoff_started_mission(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+                reason=CONTEXT_PHASE_NOT_IMPLEMENTED_REASON,
+            )
+        except (MissionStartError, RuntimeError, ValueError) as error:
+            print(f"run aborted: {error}")
+            return 1
 
         print(f"run_id: {run_id}")
         if took_over_stale_lock:
@@ -181,7 +212,9 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
         else:
             print("run lock: acquired for select phase")
         print(f"selected_issue: {selected_issue}")
-        print("next_phase: start (not implemented in this milestone)")
+        print(f"started_branch: {started_mission.branch}")
+        print(f"lease_expires_at: {started_mission.lease_expires_at}")
+        print("next_phase: manual-handoff")
         return 0
     finally:
         store.clear_lock(run_id)
