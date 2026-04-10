@@ -74,7 +74,6 @@ def publish_mission(
         published_at + timedelta(minutes=config.mission_lease_minutes)
     )
 
-    publish_label_names = issue_label_names | {config.labels["reviewing"]}
     try:
         sync_publish_labels(
             client=client,
@@ -101,7 +100,11 @@ def publish_mission(
                 "Shinobi failed to complete publish phase after creating or updating "
                 f"PR #{pr_number}: {error}"
             ),
-            known_label_names=publish_label_names,
+            known_label_names=load_handoff_label_names(
+                client=client,
+                issue_number=issue_number,
+                fallback_label_names=issue_label_names,
+            ),
         )
         message = str(error)
         if rollback_error is not None:
@@ -133,7 +136,11 @@ def publish_mission(
                 "Shinobi failed to persist final local state during publish phase "
                 f"after updating PR #{pr_number}: {error}"
             ),
-            known_label_names=publish_label_names,
+            known_label_names=load_handoff_label_names(
+                client=client,
+                issue_number=issue_number,
+                fallback_label_names={config.labels["reviewing"]},
+            ),
         )
         message = (
             "GitHub PR, labels, and mission-state comment were updated but final "
@@ -332,6 +339,18 @@ def sync_publish_labels(
         ) from error
 
 
+def load_handoff_label_names(
+    *,
+    client: GitHubClient,
+    issue_number: int,
+    fallback_label_names: set[str],
+) -> set[str]:
+    try:
+        return get_issue_label_names(client.get_issue(issue_number))
+    except GitHubClientError:
+        return set(fallback_label_names)
+
+
 def transition_publish_failure_to_needs_human(
     *,
     client: GitHubClient,
@@ -348,17 +367,27 @@ def transition_publish_failure_to_needs_human(
         target_label=needs_human_label,
     )
 
+    errors: list[str] = []
     try:
         client.update_issue_labels(issue_number, add=[needs_human_label])
-        if removable_labels:
+    except GitHubClientError as error:
+        errors.append(str(error))
+
+    if removable_labels:
+        try:
             client.update_issue_labels(issue_number, remove=removable_labels)
+        except GitHubClientError as error:
+            errors.append(str(error))
+
+    try:
         client.create_issue_comment(
             issue_number,
             f"{reason}\n\nPR: #{pr_number}\n",
         )
     except GitHubClientError as error:
-        return str(error)
-    return None
+        errors.append(str(error))
+
+    return "; ".join(errors) or None
 
 
 def upsert_publish_comment(

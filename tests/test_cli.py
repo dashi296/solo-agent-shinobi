@@ -1946,10 +1946,16 @@ class MissionPublishTest(unittest.TestCase):
                         "number": 44,
                         "url": "https://github.com/owner/repo/pull/44",
                     }
-                    client.get_issue.return_value = {
-                        "number": 31,
-                        "labels": [{"name": "shinobi:working"}],
-                    }
+                    client.get_issue.side_effect = [
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:working"}],
+                        },
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:reviewing"}],
+                        },
+                    ]
                     client.list_issue_comments.return_value = []
 
                     publish_mission(
@@ -1988,13 +1994,23 @@ class MissionPublishTest(unittest.TestCase):
         ):
             with patch("shinobi.mission_publish.GitHubClient") as client_cls:
                 client = client_cls.return_value
-                client.get_issue.return_value = {
-                    "number": 31,
-                    "labels": [
-                        {"name": "shinobi:ready"},
-                        {"name": "shinobi:working"},
-                    ],
-                }
+                client.get_issue.side_effect = [
+                    {
+                        "number": 31,
+                        "labels": [
+                            {"name": "shinobi:ready"},
+                            {"name": "shinobi:working"},
+                        ],
+                    },
+                    {
+                        "number": 31,
+                        "labels": [
+                            {"name": "shinobi:ready"},
+                            {"name": "shinobi:working"},
+                            {"name": "shinobi:reviewing"},
+                        ],
+                    },
+                ]
                 client.list_pull_requests_by_head.return_value = []
                 client.create_pull_request.return_value = {
                     "number": 44,
@@ -2076,10 +2092,16 @@ class MissionPublishTest(unittest.TestCase):
             ):
                 with patch("shinobi.mission_publish.GitHubClient") as client_cls:
                     client = client_cls.return_value
-                    client.get_issue.return_value = {
-                        "number": 31,
-                        "labels": [{"name": "shinobi:working"}],
-                    }
+                    client.get_issue.side_effect = [
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:working"}],
+                        },
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:reviewing"}],
+                        },
+                    ]
                     client.list_pull_requests_by_head.return_value = []
                     client.create_pull_request.return_value = {
                         "number": 44,
@@ -2107,7 +2129,7 @@ class MissionPublishTest(unittest.TestCase):
                 unittest.mock.call(31, add=["shinobi:reviewing"]),
                 unittest.mock.call(31, remove=["shinobi:working"]),
                 unittest.mock.call(31, add=["shinobi:needs-human"]),
-                unittest.mock.call(31, remove=["shinobi:reviewing", "shinobi:working"]),
+                unittest.mock.call(31, remove=["shinobi:reviewing"]),
             ],
         )
         self.assertEqual(client.create_issue_comment.call_count, 2)
@@ -2115,6 +2137,74 @@ class MissionPublishTest(unittest.TestCase):
             "failed to persist final local state during publish phase",
             client.create_issue_comment.call_args_list[-1].args[1],
         )
+
+    def test_publish_mission_still_comments_when_handoff_label_cleanup_fails(self) -> None:
+        store = Mock()
+        store.format_timestamp.return_value = "2026-04-09T00:30:00Z"
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.side_effect = [
+                    {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    },
+                    {
+                        "number": 31,
+                        "labels": [
+                            {"name": "shinobi:working"},
+                            {"name": "shinobi:reviewing"},
+                        ],
+                    },
+                ]
+                client.list_pull_requests_by_head.return_value = []
+                client.create_pull_request.return_value = {
+                    "number": 44,
+                    "url": "https://github.com/owner/repo/pull/44",
+                }
+                client.update_issue_labels.side_effect = [
+                    None,
+                    None,
+                    None,
+                    GitHubClientError("remove failed"),
+                ]
+                client.list_issue_comments.side_effect = GitHubClientError("comments failed")
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "failed to hand off publish failure: remove failed",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        client.create_issue_comment.assert_called_once()
+        self.assertIn(
+            "failed to complete publish phase",
+            client.create_issue_comment.call_args.args[1],
+        )
+        store.save_state.assert_not_called()
 
     def test_publish_mission_rejects_non_start_state(self) -> None:
         with self.assertRaisesRegex(
