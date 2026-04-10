@@ -18,7 +18,15 @@ SECTION_ALIASES = {
 }
 
 PATH_PATTERN = re.compile(r"`([^`\n]+)`|(?:^|\s)([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)")
-HIGH_RISK_WORDS = ("全体", "全ファイル", "repo 全体", "repository-wide", "必要に応じて広く")
+HIGH_RISK_WORDS = (
+    "全ファイル",
+    "全体修正",
+    "全体リファクタ",
+    "repo 全体を変更",
+    "repo 全体を修正",
+    "repository-wide",
+    "必要に応じて広く",
+)
 LOCAL_KNOWLEDGE_PATHS = {".shinobi/summary.md", ".shinobi/decisions.md"}
 
 

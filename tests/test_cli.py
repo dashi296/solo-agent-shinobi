@@ -1807,6 +1807,47 @@ class ContextBuilderTest(unittest.TestCase):
             "issue body does not name candidate files",
         )
 
+    def test_build_mission_context_does_not_flag_negative_repo_wide_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 対象\n"
+                        "- `src/shinobi/context_builder.py`\n\n"
+                        "## 完了条件\n"
+                        "- repo 全体を読まない前提がコードで守られている\n"
+                    ),
+                },
+            )
+
+        self.assertFalse(context.needs_human_review)
+        self.assertIsNone(context.needs_human_review_reason)
+
+    def test_build_mission_context_flags_explicit_broad_scope_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 99,
+                    "title": "Broad task",
+                    "body": (
+                        "## 対象\n"
+                        "- `src/shinobi/context_builder.py`\n\n"
+                        "## 注意点\n"
+                        "- repository-wide cleanup を含む\n"
+                    ),
+                },
+            )
+
+        self.assertTrue(context.needs_human_review)
+        self.assertEqual(
+            context.needs_human_review_reason,
+            "issue body contains broad scope marker: repository-wide",
+        )
+
 
 class GitHubClientTest(unittest.TestCase):
     def test_get_issue_surfaces_parse_failure_with_context(self) -> None:
