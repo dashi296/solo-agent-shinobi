@@ -52,6 +52,24 @@ class CliTest(unittest.TestCase):
             self.assertTrue(store.paths.self_review_template_path.exists())
             self.assertTrue(store.paths.review_note_rule_template_path.exists())
             self.assertTrue(store.paths.lock_path.exists())
+            config = json.loads(store.paths.config_path.read_text(encoding="utf-8"))
+            self.assertEqual(config["verification_commands"]["lint"], [])
+            self.assertEqual(
+                config["verification_commands"]["typecheck"],
+                [
+                    "env",
+                    "PYTHONPYCACHEPREFIX=/tmp/pycache",
+                    "python3",
+                    "-m",
+                    "compileall",
+                    "src",
+                    "tests",
+                ],
+            )
+            self.assertEqual(
+                config["verification_commands"]["test"],
+                ["python3", "-m", "unittest", "tests.test_cli"],
+            )
             self.assertIn("Initialized Shinobi", output.getvalue())
 
     def test_init_does_not_overwrite_existing_workspace_templates(self) -> None:
