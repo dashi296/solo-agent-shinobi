@@ -467,7 +467,7 @@ class CliTest(unittest.TestCase):
                                                 pr_url="https://github.com/owner/repo/pull/31",
                                                 lease_expires_at="2026-04-09T00:30:00Z",
                                             ),
-                                        ):
+                                        ) as publish_mock:
                                             with redirect_stdout(output):
                                                 exit_code = cli.main(["run"])
 
@@ -478,6 +478,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("started_branch: feature/issue-6-run-start-phase", rendered)
             self.assertIn("published_pr: #31", rendered)
             self.assertIn("next_phase: review", rendered)
+            self.assertNotIn("now", publish_mock.call_args.kwargs)
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_refuses_active_github_mission_before_selecting_ready_issue(self) -> None:
@@ -1750,7 +1751,8 @@ class MissionPublishTest(unittest.TestCase):
             self.assertIsNotNone(config)
             run_id = "run-123"
             now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
-            store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)
+            lock_started_at = datetime(2026, 4, 8, 23, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id=run_id, pid=123, now=lock_started_at)
             store.save_state(
                 cli.State(
                     issue_number=31,
@@ -1843,6 +1845,9 @@ class MissionPublishTest(unittest.TestCase):
             self.assertEqual(state.phase, "publish")
             self.assertEqual(state.pr_number, 44)
             self.assertEqual(state.last_result, "published")
+            lock = store.load_lock()
+            self.assertIsNotNone(lock)
+            self.assertEqual(lock.heartbeat_at, "2026-04-09T00:00:00Z")
 
     def test_publish_mission_updates_existing_pr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

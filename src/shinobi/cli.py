@@ -199,7 +199,6 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 run_id=run_id,
                 state=store.load_state(),
                 execution_result=execution_result,
-                now=now,
             )
         except (MissionStartError, MissionPublishError, RuntimeError, ValueError) as error:
             print(f"run aborted: {error}")

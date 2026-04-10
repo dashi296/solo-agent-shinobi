@@ -329,6 +329,32 @@ class StateStore:
                 )
             return lock
 
+    def refresh_lock_heartbeat(
+        self,
+        *,
+        run_id: str,
+        agent_identity: str,
+        now: datetime,
+    ) -> RunLock:
+        self.paths.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.paths.lock_path.open("a+", encoding="utf-8") as lock_file:
+            self._lock_file(lock_file)
+            try:
+                lock = self._load_lock_from_file(lock_file)
+            except (JSONDecodeError, TypeError, ValueError) as error:
+                raise ValueError(f"failed to load run lock: {error}") from error
+            if lock is None:
+                raise RuntimeError("run lock is missing before heartbeat update")
+            if lock.run_id != run_id or lock.agent_identity != agent_identity:
+                raise RuntimeError(
+                    "run lock owner changed before heartbeat update "
+                    f"(expected {run_id}/{agent_identity}, got {lock.run_id}/{lock.agent_identity})"
+                )
+
+            lock.heartbeat_at = self.format_timestamp(now)
+            self._write_lock_to_file(lock_file, lock)
+            return lock
+
     def acquire_lock(
         self,
         *,

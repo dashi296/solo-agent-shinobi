@@ -40,6 +40,11 @@ def publish_mission(
     published_at = now or datetime.now(timezone.utc)
     issue_number, branch = require_publishable_state(state)
     store.require_lock_owner(run_id, config.agent_identity)
+    store.refresh_lock_heartbeat(
+        run_id=run_id,
+        agent_identity=config.agent_identity,
+        now=published_at,
+    )
 
     push_branch(root, branch)
 
