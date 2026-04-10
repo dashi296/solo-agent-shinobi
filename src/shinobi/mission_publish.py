@@ -39,6 +39,7 @@ def publish_mission(
 ) -> PublishedMission:
     published_at = now or datetime.now(timezone.utc)
     issue_number, branch = require_publishable_state(state)
+    require_publishable_execution_result(execution_result)
     store.require_lock_owner(run_id, config.agent_identity)
     store.refresh_lock_heartbeat(
         run_id=run_id,
@@ -115,6 +116,24 @@ def require_publishable_state(state: State) -> tuple[int, str]:
     if state.retryable_local_only:
         raise MissionPublishError("publish phase cannot run on retryable local-only state")
     return state.issue_number, state.branch
+
+
+def require_publishable_execution_result(execution_result: ExecutionResult) -> None:
+    blocking_results = [
+        command
+        for command in execution_result.commands
+        if command.status in {"failed", "error"}
+    ]
+    if not blocking_results:
+        return
+
+    rendered_results = ", ".join(
+        f"{command.name}: {command.status}" for command in blocking_results
+    )
+    raise MissionPublishError(
+        "publish phase requires verification commands without failed/error results "
+        f"({rendered_results})"
+    )
 
 
 def push_branch(root: Path, branch: str) -> None:

@@ -34,7 +34,7 @@ from shinobi.mission_start import (
     handoff_started_mission,
     start_mission,
 )
-from shinobi.models import Config
+from shinobi.models import Config, ExecutionResult, VerificationCommandResult
 from shinobi.state_store import StateStore
 
 
@@ -1924,6 +1924,50 @@ class MissionPublishTest(unittest.TestCase):
                 state=cli.State(issue_number=31, branch="feature/issue-31", phase="idle"),
                 execution_result=Mock(),
             )
+
+    def test_publish_mission_rejects_failed_verification_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[
+                VerificationCommandResult(
+                    name="lint",
+                    command=[],
+                    status="not_configured",
+                ),
+                VerificationCommandResult(
+                    name="test",
+                    command=["python3", "-m", "unittest"],
+                    status="failed",
+                    returncode=1,
+                ),
+            ],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with self.assertRaisesRegex(
+                MissionPublishError,
+                "test: failed",
+            ):
+                publish_mission(
+                    root=Path("/tmp/repo"),
+                    store=store,
+                    config=config,
+                    run_id="run-123",
+                    state=state,
+                    execution_result=execution_result,
+                )
+
+        run_mock.assert_not_called()
+        store.require_lock_owner.assert_not_called()
 
     def test_find_mission_state_comment_matches_issue_and_branch(self) -> None:
         comment = find_mission_state_comment(
