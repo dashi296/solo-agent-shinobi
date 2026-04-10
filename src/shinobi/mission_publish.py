@@ -38,7 +38,11 @@ def publish_mission(
     now: datetime | None = None,
 ) -> PublishedMission:
     published_at = now or datetime.now(timezone.utc)
-    issue_number, branch = require_publishable_state(state)
+    issue_number, branch = require_publishable_state(
+        state,
+        run_id=run_id,
+        agent_identity=config.agent_identity,
+    )
     require_publishable_execution_result(execution_result)
     store.require_lock_owner(run_id, config.agent_identity)
     store.refresh_lock_heartbeat(
@@ -104,10 +108,24 @@ def publish_mission(
     )
 
 
-def require_publishable_state(state: State) -> tuple[int, str]:
+def require_publishable_state(
+    state: State,
+    *,
+    run_id: str,
+    agent_identity: str,
+) -> tuple[int, str]:
     if state.phase != "start":
         raise MissionPublishError(
             f"publish phase requires local state phase start, got {state.phase}"
+        )
+    if state.run_id != run_id:
+        raise MissionPublishError(
+            f"publish phase requires local state run_id {run_id}, got {state.run_id}"
+        )
+    if state.agent_identity != agent_identity:
+        raise MissionPublishError(
+            "publish phase requires local state agent_identity "
+            f"{agent_identity}, got {state.agent_identity}"
         )
     if state.issue_number is None:
         raise MissionPublishError("publish phase requires issue_number in local state")

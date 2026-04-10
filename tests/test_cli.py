@@ -1969,6 +1969,70 @@ class MissionPublishTest(unittest.TestCase):
         run_mock.assert_not_called()
         store.require_lock_owner.assert_not_called()
 
+    def test_publish_mission_rejects_state_from_different_run_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="previous-run",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with self.assertRaisesRegex(
+                MissionPublishError,
+                "publish phase requires local state run_id run-123",
+            ):
+                publish_mission(
+                    root=Path("/tmp/repo"),
+                    store=store,
+                    config=config,
+                    run_id="run-123",
+                    state=state,
+                    execution_result=execution_result,
+                )
+
+        run_mock.assert_not_called()
+        store.require_lock_owner.assert_not_called()
+
+    def test_publish_mission_rejects_state_from_different_agent_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-2",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with self.assertRaisesRegex(
+                MissionPublishError,
+                "publish phase requires local state agent_identity agent-1",
+            ):
+                publish_mission(
+                    root=Path("/tmp/repo"),
+                    store=store,
+                    config=config,
+                    run_id="run-123",
+                    state=state,
+                    execution_result=execution_result,
+                )
+
+        run_mock.assert_not_called()
+        store.require_lock_owner.assert_not_called()
+
     def test_find_mission_state_comment_matches_issue_and_branch(self) -> None:
         comment = find_mission_state_comment(
             [
