@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from shinobi import cli
 from shinobi.config import discover_repo_slug
 from shinobi.context_builder import build_mission_context
+from shinobi.executor import execute_verification, run_verification_command
 from shinobi.github_client import GitHubClient, GitHubClientError
 from shinobi.mission_start import (
     MissionStartError,
@@ -27,6 +28,7 @@ from shinobi.mission_start import (
     handoff_started_mission,
     start_mission,
 )
+from shinobi.models import Config
 from shinobi.state_store import StateStore
 
 
@@ -2002,6 +2004,116 @@ class ContextBuilderTest(unittest.TestCase):
         self.assertEqual(
             context.needs_human_review_reason,
             "issue body contains broad scope marker: repository-wide",
+        )
+
+
+class ExecutorTest(unittest.TestCase):
+    def test_run_verification_command_returns_passed_result(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["python3", "-m", "unittest"],
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+
+        with patch("shinobi.executor.subprocess.run", return_value=response) as run_mock:
+            result = run_verification_command(
+                Path("/tmp/repo"),
+                "test",
+                ["python3", "-m", "unittest"],
+            )
+
+        self.assertEqual(result.name, "test")
+        self.assertEqual(result.command, ["python3", "-m", "unittest"])
+        self.assertEqual(result.status, "passed")
+        self.assertTrue(result.succeeded)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "ok\n")
+        run_mock.assert_called_once()
+        self.assertEqual(run_mock.call_args.kwargs["cwd"], Path("/tmp/repo"))
+        self.assertFalse(run_mock.call_args.kwargs["check"])
+
+    def test_run_verification_command_returns_failed_result(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["python3", "-m", "unittest"],
+            returncode=1,
+            stdout="",
+            stderr="failed\n",
+        )
+
+        with patch("shinobi.executor.subprocess.run", return_value=response):
+            result = run_verification_command(
+                Path("/tmp/repo"),
+                "test",
+                ["python3", "-m", "unittest"],
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertFalse(result.succeeded)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "failed\n")
+
+    def test_run_verification_command_reports_missing_command_as_not_configured(self) -> None:
+        result = run_verification_command(Path("/tmp/repo"), "lint", [])
+
+        self.assertEqual(result.name, "lint")
+        self.assertEqual(result.command, [])
+        self.assertEqual(result.status, "not_configured")
+        self.assertFalse(result.succeeded)
+        self.assertIn("not configured", result.message or "")
+
+    def test_run_verification_command_reports_os_error(self) -> None:
+        with patch("shinobi.executor.subprocess.run", side_effect=OSError("missing binary")):
+            result = run_verification_command(Path("/tmp/repo"), "lint", ["missing-lint"])
+
+        self.assertEqual(result.status, "error")
+        self.assertFalse(result.succeeded)
+        self.assertIn("missing binary", result.message or "")
+
+    def test_execute_verification_runs_commands_in_stable_order(self) -> None:
+        config = Config(
+            repo="owner/repo",
+            verification_commands={
+                "lint": ["lint-command"],
+                "typecheck": ["typecheck-command"],
+                "test": ["test-command"],
+            },
+        )
+        responses = [
+            subprocess.CompletedProcess(args=["lint-command"], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=["typecheck-command"], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=["test-command"], returncode=1, stdout="", stderr="failed"),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses) as run_mock:
+            result = execute_verification(Path("/tmp/repo"), config)
+
+        self.assertEqual([command.name for command in result.commands], ["lint", "typecheck", "test"])
+        self.assertEqual([command.status for command in result.commands], ["passed", "passed", "failed"])
+        self.assertFalse(result.succeeded)
+        self.assertIn("No automated code changes", result.change_summary)
+        self.assertEqual(
+            [call.args[0] for call in run_mock.call_args_list],
+            [["lint-command"], ["typecheck-command"], ["test-command"]],
+        )
+
+    def test_config_preserves_custom_verification_commands(self) -> None:
+        config = Config.from_dict(
+            {
+                "repo": "owner/repo",
+                "agent_identity": "agent",
+                "verification_commands": {
+                    "lint": ["ruff", "check", "."],
+                    "test": ["python3", "-m", "unittest"],
+                },
+            }
+        )
+
+        self.assertEqual(config.verification_commands["lint"], ["ruff", "check", "."])
+        self.assertEqual(config.verification_commands["test"], ["python3", "-m", "unittest"])
+        self.assertEqual(
+            config.verification_commands["typecheck"],
+            ["python3", "-m", "compileall", "src", "tests"],
         )
 
 

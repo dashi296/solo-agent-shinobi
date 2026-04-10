@@ -4,6 +4,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+DEFAULT_VERIFICATION_COMMANDS = {
+    "lint": [],
+    "typecheck": ["python3", "-m", "compileall", "src", "tests"],
+    "test": ["python3", "-m", "unittest", "tests.test_cli"],
+}
+
+
 DEFAULT_LABELS = {
     "ready": "shinobi:ready",
     "working": "shinobi:working",
@@ -32,6 +39,11 @@ class Config:
     use_draft_pr: bool = True
     merge_method: str = "squash"
     labels: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LABELS))
+    verification_commands: Dict[str, List[str]] = field(
+        default_factory=lambda: {
+            key: list(command) for key, command in DEFAULT_VERIFICATION_COMMANDS.items()
+        }
+    )
     high_risk_paths: List[str] = field(
         default_factory=lambda: ["migrations/", "infra/", "auth/", "billing/"]
     )
@@ -49,6 +61,11 @@ class Config:
         labels = dict(DEFAULT_LABELS)
         labels.update(merged.get("labels", {}))
         merged["labels"] = labels
+        verification_commands = {
+            key: list(command) for key, command in DEFAULT_VERIFICATION_COMMANDS.items()
+        }
+        verification_commands.update(merged.get("verification_commands", {}))
+        merged["verification_commands"] = verification_commands
         known_fields = {field.name for field in cls.__dataclass_fields__.values()}
         known_fields.discard("extra")
         extra = {key: merged.pop(key) for key in list(merged) if key not in known_fields}
@@ -129,3 +146,28 @@ class RunLock:
         known_fields.discard("extra")
         extra = {key: merged.pop(key) for key in list(merged) if key not in known_fields}
         return cls(**merged, extra=extra)
+
+
+@dataclass(frozen=True)
+class VerificationCommandResult:
+    name: str
+    command: List[str]
+    status: str
+    returncode: Optional[int] = None
+    stdout: str = ""
+    stderr: str = ""
+    message: Optional[str] = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == "passed"
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    commands: List[VerificationCommandResult]
+    change_summary: str
+
+    @property
+    def succeeded(self) -> bool:
+        return all(command.succeeded for command in self.commands)
