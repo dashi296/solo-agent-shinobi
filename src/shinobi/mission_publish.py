@@ -61,13 +61,34 @@ def publish_mission(
 
     push_branch(root, branch)
 
-    pr = create_or_update_pull_request(
-        client=client,
-        config=config,
-        issue_number=issue_number,
-        branch=branch,
-        execution_result=execution_result,
-    )
+    try:
+        pr = create_or_update_pull_request(
+            client=client,
+            config=config,
+            issue_number=issue_number,
+            branch=branch,
+            execution_result=execution_result,
+        )
+    except MissionPublishError as error:
+        rollback_error = transition_publish_failure_to_needs_human(
+            client=client,
+            issue_number=issue_number,
+            config=config,
+            reason=(
+                "Shinobi failed to complete publish phase after pushing branch "
+                f"{branch}: {error}"
+            ),
+            known_label_names=load_handoff_label_names(
+                client=client,
+                issue_number=issue_number,
+                fallback_label_names=issue_label_names,
+            ),
+            branch=branch,
+        )
+        message = str(error)
+        if rollback_error is not None:
+            message += f"; failed to hand off publish failure: {rollback_error}"
+        raise MissionPublishError(message) from error
     pr_number = int(pr["number"])
     pr_url = str(pr.get("url") or "") or None
     lease_expires_at = store.format_timestamp(
@@ -94,7 +115,6 @@ def publish_mission(
         rollback_error = transition_publish_failure_to_needs_human(
             client=client,
             issue_number=issue_number,
-            pr_number=pr_number,
             config=config,
             reason=(
                 "Shinobi failed to complete publish phase after creating or updating "
@@ -105,6 +125,8 @@ def publish_mission(
                 issue_number=issue_number,
                 fallback_label_names=issue_label_names,
             ),
+            pr_number=pr_number,
+            branch=branch,
         )
         message = str(error)
         if rollback_error is not None:
@@ -130,7 +152,6 @@ def publish_mission(
         rollback_error = transition_publish_failure_to_needs_human(
             client=client,
             issue_number=issue_number,
-            pr_number=pr_number,
             config=config,
             reason=(
                 "Shinobi failed to persist final local state during publish phase "
@@ -141,6 +162,8 @@ def publish_mission(
                 issue_number=issue_number,
                 fallback_label_names={config.labels["reviewing"]},
             ),
+            pr_number=pr_number,
+            branch=branch,
         )
         message = (
             "GitHub PR, labels, and mission-state comment were updated but final "
@@ -355,10 +378,11 @@ def transition_publish_failure_to_needs_human(
     *,
     client: GitHubClient,
     issue_number: int,
-    pr_number: int,
     config: Config,
     reason: str,
     known_label_names: set[str],
+    pr_number: int | None = None,
+    branch: str | None = None,
 ) -> str | None:
     needs_human_label = config.labels["needs_human"]
     removable_labels = labels_to_remove_for_transition(
@@ -382,12 +406,30 @@ def transition_publish_failure_to_needs_human(
     try:
         client.create_issue_comment(
             issue_number,
-            f"{reason}\n\nPR: #{pr_number}\n",
+            render_publish_failure_comment(
+                reason=reason,
+                pr_number=pr_number,
+                branch=branch,
+            ),
         )
     except GitHubClientError as error:
         errors.append(str(error))
 
     return "; ".join(errors) or None
+
+
+def render_publish_failure_comment(
+    *,
+    reason: str,
+    pr_number: int | None,
+    branch: str | None,
+) -> str:
+    lines = [reason, ""]
+    if branch:
+        lines.append(f"Branch: `{branch}`")
+    if pr_number is not None:
+        lines.append(f"PR: #{pr_number}")
+    return "\n".join(lines) + "\n"
 
 
 def upsert_publish_comment(

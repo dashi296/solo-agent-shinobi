@@ -2415,7 +2415,7 @@ class MissionPublishTest(unittest.TestCase):
 
         self.assertIsNone(comment)
 
-    def test_publish_mission_rejects_existing_pr_lookup_failure_before_create(self) -> None:
+    def test_publish_mission_hands_off_when_pr_lookup_fails_after_push(self) -> None:
         store = Mock()
         config = Config(repo="owner/repo", agent_identity="agent-1")
         state = cli.State(
@@ -2436,10 +2436,16 @@ class MissionPublishTest(unittest.TestCase):
         ):
             with patch("shinobi.mission_publish.GitHubClient") as client_cls:
                 client = client_cls.return_value
-                client.get_issue.return_value = {
-                    "number": 31,
-                    "labels": [{"name": "shinobi:working"}],
-                }
+                client.get_issue.side_effect = [
+                    {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    },
+                    {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    },
+                ]
                 client.list_pull_requests_by_head.side_effect = GitHubClientError(
                     "api unavailable"
                 )
@@ -2458,6 +2464,22 @@ class MissionPublishTest(unittest.TestCase):
                     )
 
         client.create_pull_request.assert_not_called()
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(31, remove=["shinobi:working"]),
+            ],
+        )
+        client.create_issue_comment.assert_called_once()
+        self.assertIn(
+            "failed to complete publish phase after pushing branch",
+            client.create_issue_comment.call_args.args[1],
+        )
+        self.assertIn(
+            "Branch: `feature/issue-31-publish-phase`",
+            client.create_issue_comment.call_args.args[1],
+        )
 
     def test_parse_mission_state_fields_reads_marker_only(self) -> None:
         fields = parse_mission_state_fields(
