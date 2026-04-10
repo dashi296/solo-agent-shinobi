@@ -121,7 +121,7 @@ def parse_markdown_sections(body: str) -> dict[str, list[str]]:
         heading = parse_heading(line)
         if heading is not None:
             if current_key is not None:
-                sections[current_key] = normalize_section_lines(current_lines)
+                append_section(sections, current_key, current_lines)
             current_key = section_key_for_heading(heading)
             current_lines = []
             continue
@@ -130,9 +130,15 @@ def parse_markdown_sections(body: str) -> dict[str, list[str]]:
             current_lines.append(line)
 
     if current_key is not None:
-        sections[current_key] = normalize_section_lines(current_lines)
+        append_section(sections, current_key, current_lines)
 
     return sections
+
+
+def append_section(
+    sections: dict[str, list[str]], key: str, lines: list[str]
+) -> None:
+    sections.setdefault(key, []).extend(normalize_section_lines(lines))
 
 
 def parse_heading(line: str) -> str | None:
@@ -200,12 +206,19 @@ def extract_candidate_files(body: str) -> list[str]:
 
     for match in PATH_PATTERN.finditer(body):
         raw_path = match.group(1) or match.group(2) or ""
-        path = raw_path.strip()
+        path = normalize_path_reference(raw_path)
         if not path or should_ignore_candidate_path(path):
             continue
         candidates.append(path)
 
     return unique_items(candidates)
+
+
+def normalize_path_reference(path: str) -> str:
+    normalized = path.strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def extract_paths_from_sections(

@@ -1789,6 +1789,62 @@ class ContextBuilderTest(unittest.TestCase):
         self.assertEqual(context.candidate_files, ["docs/mvp-design.md"])
         self.assertIn(".shinobi/summary.md", context.reference_files)
 
+    def test_build_mission_context_excludes_relative_local_knowledge_from_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 要件\n"
+                        "- `./.shinobi/summary.md` を読む\n"
+                        "- `./docs/mvp-design.md` を読む\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.candidate_files, ["docs/mvp-design.md"])
+        self.assertEqual(
+            context.reference_files,
+            [
+                ".shinobi/summary.md",
+                ".shinobi/decisions.md",
+                "docs/mvp-design.md",
+            ],
+        )
+
+    def test_build_mission_context_keeps_repeated_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 要件\n"
+                        "- `src/shinobi/context_builder.py` を追加\n\n"
+                        "## 要件\n"
+                        "- `tests/test_cli.py` を更新\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(
+            context.requirements,
+            [
+                "`src/shinobi/context_builder.py` を追加",
+                "`tests/test_cli.py` を更新",
+            ],
+        )
+        self.assertEqual(
+            context.candidate_files,
+            [
+                "src/shinobi/context_builder.py",
+                "tests/test_cli.py",
+            ],
+        )
+
     def test_build_mission_context_flags_missing_candidate_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             context = build_mission_context(
