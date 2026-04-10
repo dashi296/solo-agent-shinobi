@@ -8,7 +8,7 @@ from typing import Any
 
 from .github_client import GitHubClient, GitHubClientError
 from .mission_start import get_issue_label_names, labels_to_remove_for_transition
-from .models import Config, ExecutionResult, State
+from .models import Config, ExecutionResult, State, VerificationCommandResult
 from .state_store import StateStore
 
 MISSION_STATE_MARKER = "<!-- shinobi:mission-state"
@@ -137,11 +137,7 @@ def require_publishable_state(
 
 
 def require_publishable_execution_result(execution_result: ExecutionResult) -> None:
-    blocking_results = [
-        command
-        for command in execution_result.commands
-        if command.status in {"failed", "error"}
-    ]
+    blocking_results = blocking_verification_results(execution_result)
     if not blocking_results:
         return
 
@@ -152,6 +148,16 @@ def require_publishable_execution_result(execution_result: ExecutionResult) -> N
         "publish phase requires verification commands without failed/error results "
         f"({rendered_results})"
     )
+
+
+def blocking_verification_results(
+    execution_result: ExecutionResult,
+) -> list[VerificationCommandResult]:
+    return [
+        command
+        for command in execution_result.commands
+        if command.status in {"failed", "error"}
+    ]
 
 
 def push_branch(root: Path, branch: str) -> None:

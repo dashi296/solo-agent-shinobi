@@ -16,9 +16,18 @@ from .issue_selector import (
     list_open_issues_with_any_label,
     select_ready_issue,
 )
-from .mission_publish import MissionPublishError, publish_mission
-from .mission_start import MissionStartError, start_mission
-from .models import State
+from .mission_publish import (
+    MissionPublishError,
+    blocking_verification_results,
+    publish_mission,
+)
+from .mission_start import (
+    MissionStartError,
+    StartedMission,
+    handoff_started_mission,
+    start_mission,
+)
+from .models import Config, ExecutionResult, State
 from .state_store import StateStore
 
 
@@ -192,6 +201,14 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 now=now,
             )
             execution_result = execute_verification(root, config)
+            handoff_failed_verification(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+                execution_result=execution_result,
+            )
             published_mission = publish_mission(
                 root=root,
                 store=store,
@@ -245,6 +262,37 @@ def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int
         )
 
     return None
+
+
+def handoff_failed_verification(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+    execution_result: ExecutionResult,
+) -> None:
+    blocking_results = blocking_verification_results(execution_result)
+    if not blocking_results:
+        return
+
+    rendered_results = ", ".join(
+        f"{command.name}: {command.status}" for command in blocking_results
+    )
+    reason = (
+        "Shinobi stopped before publish because verification failed or errored "
+        f"({rendered_results})."
+    )
+    handoff_started_mission(
+        root=root,
+        store=store,
+        config=config,
+        run_id=run_id,
+        started_mission=started_mission,
+        reason=reason,
+    )
+    raise MissionPublishError(reason)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

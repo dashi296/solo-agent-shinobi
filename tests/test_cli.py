@@ -456,6 +456,7 @@ class CliTest(unittest.TestCase):
                                 ):
                                     execution_result = Mock()
                                     execution_result.succeeded = True
+                                    execution_result.commands = []
                                     with patch(
                                         "shinobi.cli.execute_verification",
                                         return_value=execution_result,
@@ -479,6 +480,65 @@ class CliTest(unittest.TestCase):
             self.assertIn("published_pr: #31", rendered)
             self.assertIn("next_phase: review", rendered)
             self.assertNotIn("now", publish_mock.call_args.kwargs)
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_hands_off_when_verification_fails_before_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="failed",
+                                returncode=1,
+                            )
+                        ],
+                        change_summary="No automated code changes are performed.",
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.handoff_started_mission"
+                                        ) as handoff_mock:
+                                            with patch(
+                                                "shinobi.cli.publish_mission"
+                                            ) as publish_mock:
+                                                with redirect_stdout(output):
+                                                    exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: Shinobi stopped before publish because verification failed",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertIn("test: failed", handoff_mock.call_args.kwargs["reason"])
+            publish_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_refuses_active_github_mission_before_selecting_ready_issue(self) -> None:
