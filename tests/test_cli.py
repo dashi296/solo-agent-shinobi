@@ -1814,6 +1814,27 @@ class ContextBuilderTest(unittest.TestCase):
             ],
         )
 
+    def test_build_mission_context_falls_back_when_targets_are_only_local_knowledge(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 28,
+                    "title": "Context task",
+                    "body": (
+                        "## 対象\n"
+                        "- `.shinobi/summary.md`\n\n"
+                        "## 要件\n"
+                        "- `src/shinobi/context_builder.py` を更新\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.candidate_files, ["src/shinobi/context_builder.py"])
+        self.assertFalse(context.needs_human_review)
+
     def test_build_mission_context_keeps_repeated_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             context = build_mission_context(
@@ -1857,6 +1878,33 @@ class ContextBuilderTest(unittest.TestCase):
             )
 
         self.assertEqual(context.candidate_files, [])
+        self.assertTrue(context.needs_human_review)
+        self.assertEqual(
+            context.needs_human_review_reason,
+            "issue body does not name candidate files",
+        )
+
+    def test_build_mission_context_does_not_fallback_to_scope_out_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            context = build_mission_context(
+                Path(tmp_dir),
+                {
+                    "number": 99,
+                    "title": "Scoped task",
+                    "body": (
+                        "## スコープ外\n"
+                        "- `src/shinobi/context_builder.py` は変更しない\n\n"
+                        "## 禁止事項\n"
+                        "- `docs/architecture.md` を編集しない\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.candidate_files, [])
+        self.assertEqual(
+            context.reference_files,
+            [".shinobi/summary.md", ".shinobi/decisions.md"],
+        )
         self.assertTrue(context.needs_human_review)
         self.assertEqual(
             context.needs_human_review_reason,

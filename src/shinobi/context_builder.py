@@ -73,15 +73,16 @@ def build_mission_context(root: Path, issue: dict) -> MissionContext:
         keys=REFERENCE_SOURCE_SECTIONS,
         fallback=body,
     )
-    target_paths = extract_candidate_files("\n".join(sections.get("targets", [])))
+    target_paths = filter_local_knowledge_paths(
+        extract_candidate_files("\n".join(sections.get("targets", [])))
+    )
     fallback_candidate_paths = extract_paths_from_sections(
         sections,
         keys=CANDIDATE_SOURCE_SECTIONS,
         fallback=body,
     )
-    candidate_files = filter_local_knowledge_paths(
-        target_paths or fallback_candidate_paths
-    )
+    fallback_candidate_paths = filter_local_knowledge_paths(fallback_candidate_paths)
+    candidate_files = target_paths or fallback_candidate_paths
     reference_files = unique_items(
         [
             ".shinobi/summary.md",
@@ -225,7 +226,11 @@ def extract_paths_from_sections(
     sections: dict[str, list[str]], *, keys: tuple[str, ...], fallback: str
 ) -> list[str]:
     selected_text = "\n".join(item for key in keys for item in sections.get(key, []))
-    return extract_candidate_files(selected_text or fallback)
+    if selected_text:
+        return extract_candidate_files(selected_text)
+    if sections:
+        return []
+    return extract_candidate_files(fallback)
 
 
 def filter_local_knowledge_paths(paths: list[str]) -> list[str]:
