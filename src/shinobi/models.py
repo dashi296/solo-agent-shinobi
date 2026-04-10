@@ -11,6 +11,10 @@ DEFAULT_VERIFICATION_COMMANDS = {
 }
 
 
+def default_verification_commands() -> Dict[str, List[str]]:
+    return {key: list(command) for key, command in DEFAULT_VERIFICATION_COMMANDS.items()}
+
+
 DEFAULT_LABELS = {
     "ready": "shinobi:ready",
     "working": "shinobi:working",
@@ -40,9 +44,7 @@ class Config:
     merge_method: str = "squash"
     labels: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LABELS))
     verification_commands: Dict[str, List[str]] = field(
-        default_factory=lambda: {
-            key: list(command) for key, command in DEFAULT_VERIFICATION_COMMANDS.items()
-        }
+        default_factory=default_verification_commands
     )
     high_risk_paths: List[str] = field(
         default_factory=lambda: ["migrations/", "infra/", "auth/", "billing/"]
@@ -61,9 +63,7 @@ class Config:
         labels = dict(DEFAULT_LABELS)
         labels.update(merged.get("labels", {}))
         merged["labels"] = labels
-        verification_commands = {
-            key: list(command) for key, command in DEFAULT_VERIFICATION_COMMANDS.items()
-        }
+        verification_commands = default_verification_commands()
         verification_commands.update(merged.get("verification_commands", {}))
         merged["verification_commands"] = verification_commands
         known_fields = {field.name for field in cls.__dataclass_fields__.values()}
