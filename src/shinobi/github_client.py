@@ -166,6 +166,26 @@ class GitHubClient:
             raise GitHubClientError(f"failed to parse PR {identifier}: expected object payload")
         return payload
 
+    def list_pull_requests_by_head(self, head: str) -> list[dict[str, Any]]:
+        payload = self._run_gh_json(
+            [
+                "pr",
+                "list",
+                "--head",
+                head,
+                "--state",
+                "open",
+                "--json",
+                "number,url,isDraft,headRefName,baseRefName",
+            ],
+            action=f"list PRs for head {head}",
+        )
+        if not isinstance(payload, list):
+            raise GitHubClientError(
+                f"failed to parse PR list for head {head}: expected list payload"
+            )
+        return [pr for pr in payload if isinstance(pr, dict)]
+
     def get_ci_status(self, pr_number: int) -> list[dict[str, Any]]:
         payload = self._run_gh_json(
             [

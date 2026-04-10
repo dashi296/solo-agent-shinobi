@@ -1841,13 +1841,7 @@ class MissionPublishTest(unittest.TestCase):
             ):
                 with patch("shinobi.mission_publish.GitHubClient") as client_cls:
                     client = client_cls.return_value
-                    client.get_pull_request.side_effect = [
-                        GitHubClientError("no PR found"),
-                        {
-                            "number": 44,
-                            "url": "https://github.com/owner/repo/pull/44",
-                        },
-                    ]
+                    client.list_pull_requests_by_head.return_value = []
                     client.create_pull_request.return_value = {
                         "number": 44,
                         "url": "https://github.com/owner/repo/pull/44",
@@ -1942,10 +1936,12 @@ class MissionPublishTest(unittest.TestCase):
             ):
                 with patch("shinobi.mission_publish.GitHubClient") as client_cls:
                     client = client_cls.return_value
-                    client.get_pull_request.return_value = {
-                        "number": 44,
-                        "url": "https://github.com/owner/repo/pull/44",
-                    }
+                    client.list_pull_requests_by_head.return_value = [
+                        {
+                            "number": 44,
+                            "url": "https://github.com/owner/repo/pull/44",
+                        }
+                    ]
                     client.update_pull_request.return_value = {
                         "number": 44,
                         "url": "https://github.com/owner/repo/pull/44",
@@ -2065,7 +2061,7 @@ class MissionPublishTest(unittest.TestCase):
                     )
 
         run_mock.assert_not_called()
-        client.get_pull_request.assert_not_called()
+        client.list_pull_requests_by_head.assert_not_called()
         client.create_pull_request.assert_not_called()
 
     def test_publish_mission_rejects_state_from_different_run_before_push(self) -> None:
@@ -2178,6 +2174,50 @@ class MissionPublishTest(unittest.TestCase):
         )
 
         self.assertIsNone(comment)
+
+    def test_publish_mission_rejects_existing_pr_lookup_failure_before_create(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 31,
+                    "labels": [{"name": "shinobi:working"}],
+                }
+                client.list_pull_requests_by_head.side_effect = GitHubClientError(
+                    "api unavailable"
+                )
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "failed to look up existing PR for issue #31",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        client.create_pull_request.assert_not_called()
 
     def test_parse_mission_state_fields_reads_marker_only(self) -> None:
         fields = parse_mission_state_fields(
@@ -2807,6 +2847,54 @@ class GitHubClientTest(unittest.TestCase):
         self.assertIn("--draft", create_command)
         self.assertIn("--head", create_command)
         self.assertIn("feature/issue-25", create_command)
+
+    def test_list_pull_requests_by_head_returns_open_prs_for_branch(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "pr", "list"],
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 42,
+                        "url": "https://github.com/owner/repo/pull/42",
+                        "isDraft": True,
+                        "headRefName": "feature/issue-25",
+                        "baseRefName": "main",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                prs = client.list_pull_requests_by_head("feature/issue-25")
+
+        self.assertEqual(prs[0]["number"], 42)
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:3], ["gh", "pr", "list"])
+        self.assertIn("--head", command)
+        self.assertIn("feature/issue-25", command)
+        self.assertIn("--state", command)
+        self.assertIn("open", command)
+
+    def test_list_pull_requests_by_head_rejects_non_list_payload(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "pr", "list"],
+            returncode=0,
+            stdout=json.dumps({"number": 42}),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response):
+                client = GitHubClient(Path("/tmp/repo"))
+                with self.assertRaisesRegex(
+                    GitHubClientError,
+                    "failed to parse PR list for head feature/issue-25",
+                ):
+                    client.list_pull_requests_by_head("feature/issue-25")
 
     def test_init_keeps_shinobi_directory_ignored_by_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -229,8 +229,13 @@ def create_or_update_pull_request(
     title = f"#{issue_number} Publish mission changes"
     body = render_pr_body(issue_number=issue_number, execution_result=execution_result)
     try:
-        existing_pr = client.get_pull_request(branch)
-    except GitHubClientError:
+        existing_prs = client.list_pull_requests_by_head(branch)
+    except GitHubClientError as error:
+        raise MissionPublishError(
+            f"failed to look up existing PR for issue #{issue_number}: {error}"
+        ) from error
+
+    if not existing_prs:
         try:
             return client.create_pull_request(
                 title=title,
@@ -244,6 +249,7 @@ def create_or_update_pull_request(
                 f"failed to create PR for issue #{issue_number}: {error}"
             ) from error
 
+    existing_pr = existing_prs[0]
     try:
         return client.update_pull_request(
             int(existing_pr["number"]),
