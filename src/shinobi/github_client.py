@@ -218,10 +218,13 @@ class GitHubClient:
             action=f"load CI status for PR #{pr_number}",
             allowed_returncodes={0, 1, 8},
         )
-        if result.returncode == 1 and "no checks reported" in result.stderr:
+        output = result.stdout.strip()
+        error_output = result.stderr.strip()
+        combined_output = f"{output}\n{error_output}".lower()
+        if result.returncode == 1 and "no checks reported" in combined_output:
             return []
-        if result.returncode == 1:
-            message = result.stderr.strip() or result.stdout.strip() or "gh exited with status 1"
+        if result.returncode == 1 and not output:
+            message = error_output or "gh exited with status 1"
             raise GitHubClientError(
                 f"failed to load CI status for PR #{pr_number} with gh: {message}"
             )

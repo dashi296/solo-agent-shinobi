@@ -5598,6 +5598,40 @@ class GitHubClientTest(unittest.TestCase):
 
         self.assertEqual(status, [])
 
+    def test_get_ci_status_accepts_failed_checks_from_exit_code_one(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "pr", "checks", "44"],
+            returncode=1,
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test",
+                        "state": "FAILURE",
+                        "bucket": "fail",
+                        "link": "https://ci/test",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                client = GitHubClient(Path("/tmp/repo"))
+                status = client.get_ci_status(44)
+
+        self.assertEqual(
+            status,
+            [
+                {
+                    "name": "test",
+                    "state": "FAILURE",
+                    "bucket": "fail",
+                    "link": "https://ci/test",
+                }
+            ],
+        )
+
     def test_update_issue_labels_runs_add_then_remove_operations(self) -> None:
         responses = [
             subprocess.CompletedProcess(args=["gh", "issue", "edit", "6"], returncode=0, stdout="", stderr=""),
