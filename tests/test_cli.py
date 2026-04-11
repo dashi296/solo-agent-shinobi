@@ -5950,8 +5950,10 @@ class GitHubClientTest(unittest.TestCase):
         second_command = run_mock.call_args_list[1].args[0]
         self.assertIn("--add-label", first_command)
         self.assertIn("shinobi:working", first_command)
+        self.assertEqual(first_command[-2:], ["--repo", "owner/repo"])
         self.assertIn("--remove-label", second_command)
         self.assertIn("shinobi:ready", second_command)
+        self.assertEqual(second_command[-2:], ["--repo", "owner/repo"])
 
     def test_create_issue_comment_runs_gh_issue_comment(self) -> None:
         response = subprocess.CompletedProcess(
@@ -5970,6 +5972,7 @@ class GitHubClientTest(unittest.TestCase):
         self.assertEqual(command[:4], ["gh", "issue", "comment", "6"])
         self.assertIn("--body", command)
         self.assertIn("mission started", command)
+        self.assertEqual(command[-2:], ["--repo", "owner/repo"])
 
     def test_close_issue_runs_gh_issue_close(self) -> None:
         response = subprocess.CompletedProcess(
@@ -5984,7 +5987,9 @@ class GitHubClientTest(unittest.TestCase):
                 client = GitHubClient(Path("/tmp/repo"))
                 client.close_issue(6)
 
-        self.assertEqual(run_mock.call_args.args[0][:4], ["gh", "issue", "close", "6"])
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:4], ["gh", "issue", "close", "6"])
+        self.assertEqual(command[-2:], ["--repo", "owner/repo"])
 
     def test_rerun_workflow_run_scopes_command_to_repo(self) -> None:
         response = subprocess.CompletedProcess(
@@ -6153,6 +6158,7 @@ class GitHubClientTest(unittest.TestCase):
         self.assertIn("--draft", create_command)
         self.assertIn("--head", create_command)
         self.assertIn("feature/issue-25", create_command)
+        self.assertEqual(create_command[-2:], ["--repo", "owner/repo"])
 
     def test_list_pull_requests_by_head_returns_open_prs_for_branch(self) -> None:
         response = subprocess.CompletedProcess(
@@ -6184,6 +6190,7 @@ class GitHubClientTest(unittest.TestCase):
         self.assertIn("feature/issue-25", command)
         self.assertIn("--state", command)
         self.assertIn("open", command)
+        self.assertEqual(command[-2:], ["--repo", "owner/repo"])
 
     def test_list_pull_requests_by_head_rejects_non_list_payload(self) -> None:
         response = subprocess.CompletedProcess(
@@ -6236,6 +6243,7 @@ class GitHubClientTest(unittest.TestCase):
         ready_command = run_mock.call_args_list[0].args[0]
         self.assertEqual(ready_command[:4], ["gh", "pr", "ready", "42"])
         self.assertIn("--undo", ready_command)
+        self.assertEqual(ready_command[-2:], ["--repo", "owner/repo"])
 
     def test_convert_pull_request_to_ready_fetches_updated_pr_metadata(self) -> None:
         responses = [
@@ -6271,6 +6279,7 @@ class GitHubClientTest(unittest.TestCase):
         ready_command = run_mock.call_args_list[0].args[0]
         self.assertEqual(ready_command[:4], ["gh", "pr", "ready", "42"])
         self.assertNotIn("--undo", ready_command)
+        self.assertEqual(ready_command[-2:], ["--repo", "owner/repo"])
 
     def test_init_keeps_shinobi_directory_ignored_by_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
