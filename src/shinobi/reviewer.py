@@ -15,17 +15,24 @@ class ReviewerError(RuntimeError):
 
 
 PENDING_CHECK_STATES = {
-    "action_required",
     "expected",
     "in_progress",
     "pending",
     "queued",
     "requested",
-    "startup_failure",
     "waiting",
 }
 SUCCESS_CHECK_STATES = {"neutral", "success", "skipped"}
-FAILURE_CHECK_STATES = {"cancelled", "failure", "error", "timed_out"}
+FAILURE_CHECK_STATES = {
+    "action_required",
+    "cancel",
+    "cancelled",
+    "error",
+    "failure",
+    "stale",
+    "startup_failure",
+    "timed_out",
+}
 
 
 def collect_diff_stats(root: Path, *, base_ref: str) -> DiffStats:

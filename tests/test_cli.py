@@ -6275,6 +6275,19 @@ class ReviewerTest(unittest.TestCase):
         self.assertEqual(status, CIStatus(checks=[], status="pending"))
         self.assertTrue(status.is_pending)
 
+    def test_collect_ci_status_falls_back_to_failure_for_terminal_states(self) -> None:
+        client = Mock()
+        client.get_ci_status.return_value = [
+            {"name": "deploy", "state": "ACTION_REQUIRED"},
+            {"name": "build", "state": "STARTUP_FAILURE"},
+        ]
+
+        status = collect_ci_status(client, 51)
+
+        self.assertEqual(status.status, "failure")
+        self.assertTrue(status.is_failed)
+        self.assertEqual([check.bucket for check in status.checks], ["fail", "fail"])
+
 
 if __name__ == "__main__":
     unittest.main()
