@@ -179,3 +179,24 @@ class ExecutionResult:
     @property
     def succeeded(self) -> bool:
         return all(command.succeeded for command in self.commands)
+
+
+@dataclass(frozen=True)
+class DiffStats:
+    changed_files: int
+    added_lines: int
+    deleted_lines: int
+
+    @property
+    def total_changed_lines(self) -> int:
+        return self.added_lines + self.deleted_lines
+
+
+@dataclass(frozen=True)
+class ReviewDecision:
+    should_stop: bool
+    reasons: List[str]
+
+    @property
+    def can_continue(self) -> bool:
+        return not self.should_stop
