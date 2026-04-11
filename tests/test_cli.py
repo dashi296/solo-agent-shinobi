@@ -47,16 +47,25 @@ from shinobi.mission_start import (
     start_mission,
 )
 from shinobi.models import (
+    CIStatus,
     Config,
     DiffStats,
     ExecutionResult,
     MissionSummary,
+    PullRequestCheck,
     ReviewDecision,
     StopDecision,
     State,
     VerificationCommandResult,
 )
-from shinobi.reviewer import ReviewerError, collect_diff_stats, evaluate_review, parse_numstat
+from shinobi.reviewer import (
+    ReviewerError,
+    collect_ci_status,
+    collect_diff_stats,
+    evaluate_review,
+    parse_numstat,
+    wait_for_ci,
+)
 from shinobi.state_store import StateStore
 
 
@@ -5636,6 +5645,132 @@ class ReviewerTest(unittest.TestCase):
                 "total changed lines 27 exceed max_lines_changed 20",
                 "review loop count 2 reached max_review_loops 2",
             ],
+        )
+
+    def test_collect_ci_status_classifies_checks(self) -> None:
+        client = Mock()
+        client.get_ci_status.return_value = [
+            {"name": "lint", "state": "SUCCESS", "bucket": "pass", "link": "https://ci/lint"},
+            {"name": "test", "state": "IN_PROGRESS", "bucket": "pending"},
+        ]
+
+        status = collect_ci_status(client, 51)
+
+        self.assertEqual(
+            status,
+            CIStatus(
+                checks=[
+                    PullRequestCheck(
+                        name="lint",
+                        state="SUCCESS",
+                        bucket="pass",
+                        link="https://ci/lint",
+                    ),
+                    PullRequestCheck(
+                        name="test",
+                        state="IN_PROGRESS",
+                        bucket="pending",
+                        link=None,
+                    ),
+                ],
+                status="pending",
+            ),
+        )
+        self.assertTrue(status.is_pending)
+
+    def test_collect_ci_status_wraps_github_errors(self) -> None:
+        client = Mock()
+        client.get_ci_status.side_effect = GitHubClientError("api unavailable")
+
+        with self.assertRaisesRegex(
+            ReviewerError,
+            "failed to load CI status for PR #51: api unavailable",
+        ):
+            collect_ci_status(client, 51)
+
+    def test_wait_for_ci_polls_until_success_and_calls_heartbeat(self) -> None:
+        client = Mock()
+        client.get_ci_status.side_effect = [
+            [{"name": "test", "state": "IN_PROGRESS", "bucket": "pending"}],
+            [{"name": "test", "state": "SUCCESS", "bucket": "pass"}],
+        ]
+        heartbeats: list[str] = []
+        slept: list[float] = []
+        clock = {"now": 0.0}
+
+        def heartbeat() -> None:
+            heartbeats.append("tick")
+
+        def monotonic() -> float:
+            return clock["now"]
+
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock["now"] += seconds
+
+        status = wait_for_ci(
+            client,
+            51,
+            timeout_seconds=30,
+            poll_interval_seconds=5,
+            heartbeat=heartbeat,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+
+        self.assertEqual(
+            status,
+            CIStatus(
+                checks=[
+                    PullRequestCheck(
+                        name="test",
+                        state="SUCCESS",
+                        bucket="pass",
+                        link=None,
+                    )
+                ],
+                status="success",
+            ),
+        )
+        self.assertEqual(heartbeats, ["tick", "tick"])
+        self.assertEqual(slept, [5])
+
+    def test_wait_for_ci_returns_timed_out_pending_result(self) -> None:
+        client = Mock()
+        client.get_ci_status.return_value = [
+            {"name": "test", "state": "QUEUED", "bucket": "pending"}
+        ]
+        clock = {"now": 0.0}
+
+        def monotonic() -> float:
+            return clock["now"]
+
+        def sleep(seconds: float) -> None:
+            clock["now"] += seconds
+
+        status = wait_for_ci(
+            client,
+            51,
+            timeout_seconds=4,
+            poll_interval_seconds=2,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+
+        self.assertEqual(
+            status,
+            CIStatus(
+                checks=[
+                    PullRequestCheck(
+                        name="test",
+                        state="QUEUED",
+                        bucket="pending",
+                        link=None,
+                    )
+                ],
+                status="pending",
+                timed_out=True,
+            ),
         )
 
 
