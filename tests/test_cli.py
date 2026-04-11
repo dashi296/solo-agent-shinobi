@@ -2136,7 +2136,15 @@ class MissionPublishTest(unittest.TestCase):
         )
         self.assertIn("PR: #44", client.create_issue_comment.call_args.args[1])
         client.list_issue_comments.assert_not_called()
-        store.save_state.assert_not_called()
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "needs-human")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertEqual(saved_state.last_mission.pr_number, 44)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
 
     def test_publish_mission_hands_off_when_final_state_save_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2561,6 +2569,15 @@ class MissionPublishTest(unittest.TestCase):
             "Branch: `feature/issue-31-publish-phase`",
             client.create_issue_comment.call_args.args[1],
         )
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "needs-human")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertIsNone(saved_state.last_mission.pr_number)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
 
     def test_parse_mission_state_fields_reads_marker_only(self) -> None:
         fields = parse_mission_state_fields(

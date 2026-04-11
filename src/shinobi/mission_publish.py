@@ -8,7 +8,7 @@ from typing import Any
 
 from .github_client import GitHubClient, GitHubClientError
 from .mission_start import get_issue_label_names, labels_to_remove_for_transition
-from .models import Config, ExecutionResult, State, VerificationCommandResult
+from .models import Config, ExecutionResult, MissionSummary, State, VerificationCommandResult
 from .state_store import StateStore
 
 MISSION_STATE_MARKER = "<!-- shinobi:mission-state"
@@ -85,9 +85,20 @@ def publish_mission(
             ),
             branch=branch,
         )
+        state_error = None
+        if rollback_error is None:
+            state_error = save_publish_handoff_state(
+                store=store,
+                issue_number=issue_number,
+                branch=branch,
+                agent_identity=config.agent_identity,
+                reason=str(error),
+            )
         message = str(error)
         if rollback_error is not None:
             message += f"; failed to hand off publish failure: {rollback_error}"
+        elif state_error is not None:
+            message += f"; failed to persist local publish handoff state: {state_error}"
         raise MissionPublishError(message) from error
     pr_number = int(pr["number"])
     pr_url = str(pr.get("url") or "") or None
@@ -128,9 +139,21 @@ def publish_mission(
             pr_number=pr_number,
             branch=branch,
         )
+        state_error = None
+        if rollback_error is None:
+            state_error = save_publish_handoff_state(
+                store=store,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=branch,
+                agent_identity=config.agent_identity,
+                reason=str(error),
+            )
         message = str(error)
         if rollback_error is not None:
             message += f"; failed to hand off publish failure: {rollback_error}"
+        elif state_error is not None:
+            message += f"; failed to persist local publish handoff state: {state_error}"
         raise MissionPublishError(message) from error
 
     published_state = State(
@@ -165,12 +188,27 @@ def publish_mission(
             pr_number=pr_number,
             branch=branch,
         )
+        state_error = None
+        if rollback_error is None:
+            state_error = save_publish_handoff_state(
+                store=store,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=branch,
+                agent_identity=config.agent_identity,
+                reason=(
+                    "GitHub PR, labels, and mission-state comment were updated but final "
+                    f"local state persistence failed for issue #{issue_number}: {error}"
+                ),
+            )
         message = (
             "GitHub PR, labels, and mission-state comment were updated but final "
             f"local state persistence failed for issue #{issue_number}: {error}"
         )
         if rollback_error is not None:
             message += f"; failed to hand off publish failure: {rollback_error}"
+        elif state_error is not None:
+            message += f"; failed to persist local publish handoff state: {state_error}"
         raise MissionPublishError(message) from error
 
     return PublishedMission(
@@ -383,6 +421,43 @@ def load_handoff_label_names(
         return get_issue_label_names(client.get_issue(issue_number))
     except GitHubClientError:
         return set(fallback_label_names)
+
+
+def save_publish_handoff_state(
+    *,
+    store: StateStore,
+    issue_number: int,
+    branch: str,
+    agent_identity: str,
+    reason: str,
+    pr_number: int | None = None,
+) -> str | None:
+    try:
+        store.save_state(
+            State(
+                issue_number=None,
+                pr_number=None,
+                branch=None,
+                agent_identity=agent_identity,
+                run_id=None,
+                phase="idle",
+                review_loop_count=0,
+                retryable_local_only=False,
+                lease_expires_at=None,
+                last_result="needs-human",
+                last_error=reason,
+                last_mission=MissionSummary(
+                    issue_number=issue_number,
+                    pr_number=pr_number,
+                    branch=branch,
+                    phase="publish",
+                    conclusion="needs-human",
+                ),
+            )
+        )
+    except OSError as error:
+        return str(error)
+    return None
 
 
 def transition_publish_failure_to_needs_human(
