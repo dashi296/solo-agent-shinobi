@@ -207,7 +207,7 @@ class GitHubClient:
         return [pr for pr in payload if isinstance(pr, dict)]
 
     def get_ci_status(self, pr_number: int) -> list[dict[str, Any]]:
-        payload = self._run_gh_json(
+        result = self._run_gh(
             [
                 "pr",
                 "checks",
@@ -216,8 +216,20 @@ class GitHubClient:
                 "name,state,link,bucket",
             ],
             action=f"load CI status for PR #{pr_number}",
-            allowed_returncodes={0, 8},
+            allowed_returncodes={0, 1, 8},
         )
+        if result.returncode == 1 and "no checks reported" in result.stderr:
+            return []
+        if result.returncode == 1:
+            message = result.stderr.strip() or result.stdout.strip() or "gh exited with status 1"
+            raise GitHubClientError(f"failed to load CI status for PR #{pr_number} with gh: {message}")
+
+        try:
+            payload = json.loads(result.stdout or "null")
+        except JSONDecodeError as error:
+            raise GitHubClientError(
+                f"failed to parse GitHub response while trying to load CI status for PR #{pr_number}"
+            ) from error
         if not isinstance(payload, list):
             raise GitHubClientError(
                 f"failed to parse CI status for PR #{pr_number}: expected list payload"

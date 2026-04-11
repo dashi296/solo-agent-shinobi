@@ -5506,6 +5506,21 @@ class GitHubClientTest(unittest.TestCase):
             ],
         )
 
+    def test_get_ci_status_treats_no_checks_reported_as_empty_status(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "pr", "checks", "44"],
+            returncode=1,
+            stdout="",
+            stderr="no checks reported on the 'feature/test' branch\n",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                client = GitHubClient(Path("/tmp/repo"))
+                status = client.get_ci_status(44)
+
+        self.assertEqual(status, [])
+
     def test_update_issue_labels_runs_add_then_remove_operations(self) -> None:
         responses = [
             subprocess.CompletedProcess(args=["gh", "issue", "edit", "6"], returncode=0, stdout="", stderr=""),
