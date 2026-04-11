@@ -410,6 +410,31 @@ def command_review(
 
         client = GitHubClient(root, repo=config.repo)
 
+        def persist_review_error(error_message: str) -> None:
+            try:
+                store.save_state(
+                    State(
+                        issue_number=state.issue_number,
+                        pr_number=state.pr_number,
+                        branch=state.branch,
+                        agent_identity=config.agent_identity,
+                        run_id=run_id,
+                        phase="review",
+                        review_loop_count=state.review_loop_count,
+                        retryable_local_only=False,
+                        lease_expires_at=store.format_timestamp(
+                            datetime.now(timezone.utc)
+                            + timedelta(minutes=config.mission_lease_minutes)
+                        ),
+                        last_result="review-error",
+                        last_error=error_message,
+                        last_mission=state.last_mission,
+                        extra=state.extra,
+                    )
+                )
+            except OSError:
+                pass
+
         def heartbeat() -> None:
             heartbeat_now = datetime.now(timezone.utc)
             store.refresh_lock_heartbeat(
@@ -427,6 +452,7 @@ def command_review(
                 heartbeat=heartbeat,
             )
         except (ReviewerError, RuntimeError, ValueError) as error:
+            persist_review_error(str(error))
             print(f"review aborted: {error}")
             return 1
 
