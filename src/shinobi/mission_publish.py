@@ -39,6 +39,9 @@ def publish_mission(
     now: datetime | None = None,
 ) -> PublishedMission:
     published_at = now or datetime.now(timezone.utc)
+    lease_expires_at = store.format_timestamp(
+        published_at + timedelta(minutes=config.mission_lease_minutes)
+    )
     issue_number, branch = require_publishable_state(
         state,
         run_id=run_id,
@@ -83,6 +86,9 @@ def publish_mission(
                 issue_number=issue_number,
                 fallback_label_names=issue_label_names,
             ),
+            lease_expires_at=lease_expires_at,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
             branch=branch,
         )
         state_error = None
@@ -102,9 +108,6 @@ def publish_mission(
         raise MissionPublishError(message) from error
     pr_number = int(pr["number"])
     pr_url = str(pr.get("url") or "") or None
-    lease_expires_at = store.format_timestamp(
-        published_at + timedelta(minutes=config.mission_lease_minutes)
-    )
 
     try:
         sync_publish_labels(
@@ -136,6 +139,9 @@ def publish_mission(
                 issue_number=issue_number,
                 fallback_label_names=issue_label_names,
             ),
+            lease_expires_at=lease_expires_at,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
             pr_number=pr_number,
             branch=branch,
         )
@@ -185,6 +191,9 @@ def publish_mission(
                 issue_number=issue_number,
                 fallback_label_names={config.labels["reviewing"]},
             ),
+            lease_expires_at=lease_expires_at,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
             pr_number=pr_number,
             branch=branch,
         )
@@ -467,6 +476,9 @@ def transition_publish_failure_to_needs_human(
     config: Config,
     reason: str,
     known_label_names: set[str],
+    lease_expires_at: str,
+    agent_identity: str,
+    run_id: str,
     pr_number: int | None = None,
     branch: str | None = None,
 ) -> str | None:
@@ -490,15 +502,27 @@ def transition_publish_failure_to_needs_human(
             errors.append(str(error))
 
     try:
-        client.create_issue_comment(
-            issue_number,
-            render_publish_failure_comment(
-                reason=reason,
-                pr_number=pr_number,
+        if pr_number is not None and branch:
+            upsert_publish_failure_comment(
+                client=client,
+                issue_number=issue_number,
                 branch=branch,
-            ),
-        )
-    except GitHubClientError as error:
+                pr_number=pr_number,
+                lease_expires_at=lease_expires_at,
+                agent_identity=agent_identity,
+                run_id=run_id,
+                reason=reason,
+            )
+        else:
+            client.create_issue_comment(
+                issue_number,
+                render_publish_failure_comment(
+                    reason=reason,
+                    pr_number=pr_number,
+                    branch=branch,
+                ),
+            )
+    except (GitHubClientError, MissionPublishError) as error:
         errors.append(str(error))
 
     return "; ".join(errors) or None
@@ -549,6 +573,42 @@ def upsert_publish_comment(
     except (GitHubClientError, KeyError, TypeError, ValueError) as error:
         raise MissionPublishError(
             f"failed to upsert mission-state comment for issue #{issue_number}: {error}"
+        ) from error
+
+
+def upsert_publish_failure_comment(
+    *,
+    client: GitHubClient,
+    issue_number: int,
+    branch: str,
+    pr_number: int,
+    lease_expires_at: str,
+    agent_identity: str,
+    run_id: str,
+    reason: str,
+) -> None:
+    body = render_publish_failure_state_comment(
+        issue_number=issue_number,
+        branch=branch,
+        pr_number=pr_number,
+        lease_expires_at=lease_expires_at,
+        agent_identity=agent_identity,
+        run_id=run_id,
+        reason=reason,
+    )
+    try:
+        comment = find_mission_state_comment(
+            client.list_issue_comments(issue_number),
+            issue_number=issue_number,
+            branch=branch,
+        )
+        if comment is None:
+            client.create_issue_comment(issue_number, body)
+            return
+        client.update_issue_comment(int(comment["id"]), body)
+    except (GitHubClientError, KeyError, TypeError, ValueError) as error:
+        raise MissionPublishError(
+            f"failed to upsert publish failure comment for issue #{issue_number}: {error}"
         ) from error
 
 
@@ -608,4 +668,31 @@ def render_publish_comment(
         "Shinobi Publish\n\n"
         f"任務 #{issue_number} の draft PR を公開しました。\n"
         f"- pr: #{pr_number}\n"
+    )
+
+
+def render_publish_failure_state_comment(
+    *,
+    issue_number: int,
+    branch: str,
+    pr_number: int,
+    lease_expires_at: str,
+    agent_identity: str,
+    run_id: str,
+    reason: str,
+) -> str:
+    return (
+        "<!-- shinobi:mission-state\n"
+        f"issue: {issue_number}\n"
+        f"branch: {branch}\n"
+        "phase: publish\n"
+        f"pr: {pr_number}\n"
+        f"lease_expires_at: {lease_expires_at}\n"
+        f"agent_identity: {agent_identity}\n"
+        f"run_id: {run_id}\n"
+        "-->\n"
+        "Shinobi Publish Handoff\n\n"
+        f"任務 #{issue_number} の publish 中に人手対応が必要になりました。\n"
+        f"- pr: #{pr_number}\n"
+        f"- reason: {reason}\n"
     )

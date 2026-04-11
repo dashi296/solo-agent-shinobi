@@ -2103,6 +2103,18 @@ class MissionPublishTest(unittest.TestCase):
                     None,
                     None,
                 ]
+                client.list_issue_comments.return_value = [
+                    {
+                        "id": 9001,
+                        "body": (
+                            "<!-- shinobi:mission-state\n"
+                            "issue: 31\n"
+                            "branch: feature/issue-31-publish-phase\n"
+                            "phase: start\n"
+                            "-->\n"
+                        ),
+                    }
+                ]
 
                 with self.assertRaisesRegex(
                     MissionPublishError,
@@ -2129,13 +2141,13 @@ class MissionPublishTest(unittest.TestCase):
                 ),
             ],
         )
-        client.create_issue_comment.assert_called_once()
+        client.update_issue_comment.assert_called_once()
         self.assertIn(
             "failed to complete publish phase",
-            client.create_issue_comment.call_args.args[1],
+            client.update_issue_comment.call_args.args[1],
         )
-        self.assertIn("PR: #44", client.create_issue_comment.call_args.args[1])
-        client.list_issue_comments.assert_not_called()
+        self.assertIn("phase: publish", client.update_issue_comment.call_args.args[1])
+        self.assertIn("pr: 44", client.update_issue_comment.call_args.args[1])
         store.save_state.assert_called_once()
         saved_state = store.save_state.call_args.args[0]
         self.assertEqual(saved_state.phase, "idle")
@@ -2196,7 +2208,18 @@ class MissionPublishTest(unittest.TestCase):
                         "number": 44,
                         "url": "https://github.com/owner/repo/pull/44",
                     }
-                    client.list_issue_comments.return_value = []
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 31\n"
+                                "branch: feature/issue-31-publish-phase\n"
+                                "phase: start\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
                     with patch.object(store, "save_state", side_effect=OSError("disk full")):
                         with self.assertRaisesRegex(
                             MissionPublishError,
@@ -2221,10 +2244,11 @@ class MissionPublishTest(unittest.TestCase):
                 unittest.mock.call(31, remove=["shinobi:reviewing"]),
             ],
         )
-        self.assertEqual(client.create_issue_comment.call_count, 2)
+        self.assertEqual(client.create_issue_comment.call_count, 0)
+        self.assertEqual(client.update_issue_comment.call_count, 2)
         self.assertIn(
             "failed to persist final local state during publish phase",
-            client.create_issue_comment.call_args_list[-1].args[1],
+            client.update_issue_comment.call_args_list[-1].args[1],
         )
 
     def test_publish_mission_still_comments_when_handoff_label_cleanup_fails(self) -> None:
@@ -2277,7 +2301,7 @@ class MissionPublishTest(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MissionPublishError,
-                    "failed to hand off publish failure: remove failed",
+                    "failed to hand off publish failure: remove failed; failed to upsert publish failure comment for issue #31: comments failed",
                 ):
                     publish_mission(
                         root=Path("/tmp/repo"),
@@ -2288,11 +2312,8 @@ class MissionPublishTest(unittest.TestCase):
                         execution_result=execution_result,
                     )
 
-        client.create_issue_comment.assert_called_once()
-        self.assertIn(
-            "failed to complete publish phase",
-            client.create_issue_comment.call_args.args[1],
-        )
+        client.create_issue_comment.assert_not_called()
+        client.update_issue_comment.assert_not_called()
         store.save_state.assert_not_called()
 
     def test_publish_mission_rejects_non_start_state(self) -> None:
