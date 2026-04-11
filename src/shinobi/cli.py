@@ -547,22 +547,34 @@ def detect_pre_publish_stop(
             client=client,
             issue_number=started_mission.issue_number,
         )
-        blocking_labels = find_blocking_publish_labels(
-            label_names=issue_label_names,
+    except MissionPublishError as error:
+        reason = f"Shinobi failed to evaluate pre-publish stop conditions: {error}"
+        handoff_started_mission(
+            root=root,
+            store=store,
             config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
         )
-        if blocking_labels:
-            stop_publish_for_blocking_labels(
-                store=store,
-                issue_number=started_mission.issue_number,
-                branch=started_mission.branch,
-                agent_identity=config.agent_identity,
-                blocking_labels=blocking_labels,
-                blocked_label=config.labels["blocked"],
-            )
+        raise MissionPublishError(reason) from error
+
+    blocking_labels = find_blocking_publish_labels(
+        label_names=issue_label_names,
+        config=config,
+    )
+    if blocking_labels:
+        stop_publish_for_blocking_labels(
+            store=store,
+            issue_number=started_mission.issue_number,
+            branch=started_mission.branch,
+            agent_identity=config.agent_identity,
+            blocking_labels=blocking_labels,
+            blocked_label=config.labels["blocked"],
+        )
+
+    try:
         return detect_high_risk_stop(root, config)
-    except MissionPublishError:
-        raise
     except RuntimeError as error:
         reason = f"Shinobi failed to evaluate pre-publish stop conditions: {error}"
         handoff_started_mission(
