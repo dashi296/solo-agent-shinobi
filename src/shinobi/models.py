@@ -182,6 +182,15 @@ class ExecutionResult:
 
 
 @dataclass(frozen=True)
+class StopDecision:
+    reason: str
+    conclusion: str
+    retryable: bool = False
+    changed_paths: List[str] = field(default_factory=list)
+    matched_paths: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class DiffStats:
     changed_files: int
     added_lines: int

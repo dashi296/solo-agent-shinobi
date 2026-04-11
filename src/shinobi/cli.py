@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from .config import discover_workspace_root
-from .executor import execute_verification
+from .executor import detect_high_risk_stop, execute_verification
 from .github_client import GitHubClient, GitHubClientError
 from .issue_selector import (
     ensure_open_issue,
@@ -29,7 +29,7 @@ from .mission_start import (
     handoff_started_mission,
     start_mission,
 )
-from .models import Config, ExecutionResult, State
+from .models import Config, ExecutionResult, State, StopDecision
 from .state_store import StateStore
 
 
@@ -429,6 +429,15 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 started_mission=started_mission,
                 execution_result=execution_result,
             )
+            stop_decision = detect_high_risk_stop(root, config)
+            handoff_pre_publish_stop(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+                stop_decision=stop_decision,
+            )
             published_mission = publish_mission(
                 root=root,
                 store=store,
@@ -513,6 +522,35 @@ def handoff_failed_verification(
         reason=reason,
     )
     raise MissionPublishError(reason)
+
+
+def handoff_pre_publish_stop(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+    stop_decision: StopDecision | None,
+) -> None:
+    if stop_decision is None:
+        return
+
+    if stop_decision.conclusion != "needs-human":
+        raise MissionPublishError(
+            "pre-publish stop currently supports only needs-human handoff, got "
+            f"{stop_decision.conclusion}"
+        )
+
+    handoff_started_mission(
+        root=root,
+        store=store,
+        config=config,
+        run_id=run_id,
+        started_mission=started_mission,
+        reason=stop_decision.reason,
+    )
+    raise MissionPublishError(stop_decision.reason)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
