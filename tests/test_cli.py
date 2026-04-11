@@ -35,7 +35,7 @@ from shinobi.mission_start import (
     handoff_started_mission,
     start_mission,
 )
-from shinobi.models import Config, ExecutionResult, VerificationCommandResult
+from shinobi.models import Config, ExecutionResult, MissionSummary, State, VerificationCommandResult
 from shinobi.state_store import StateStore
 
 
@@ -137,7 +137,204 @@ class CliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
             self.assertIn("repo: owner/repo", rendered)
-            self.assertIn("github_status: unavailable in foundations MVP", rendered)
+            self.assertIn("github_status: no active or recent mission to reconcile", rendered)
+
+    def test_status_reconciles_active_mission_with_github(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-status-github-reconciliation",
+                            agent_identity=config.agent_identity,
+                            run_id="run-123",
+                            phase="publish",
+                        )
+                    )
+
+                    client = Mock()
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [
+                            {"name": "priority:medium"},
+                            {"name": "shinobi:reviewing"},
+                        ],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": True,
+                        "headRefName": "feature/issue-33-status-github-reconciliation",
+                        "baseRefName": "main",
+                    }
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["status"])
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("github_status_target: active", rendered)
+            self.assertIn("github_issue_state: OPEN", rendered)
+            self.assertIn("github_issue_labels: priority:medium, shinobi:reviewing", rendered)
+            self.assertIn("github_pr_state: draft", rendered)
+            self.assertIn("github_pr_head: feature/issue-33-status-github-reconciliation", rendered)
+
+    def test_status_warns_on_github_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-status-github-reconciliation",
+                            agent_identity=config.agent_identity,
+                            run_id="run-123",
+                            phase="publish",
+                        )
+                    )
+
+                    client = Mock()
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": "priority:medium"}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": False,
+                        "headRefName": "feature/unexpected-head",
+                        "baseRefName": "develop",
+                    }
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["status"])
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn(
+                "warning: issue #33 is missing expected label shinobi:reviewing for phase publish",
+                rendered,
+            )
+            self.assertIn(
+                "warning: local branch feature/issue-33-status-github-reconciliation "
+                "does not match GitHub PR head feature/unexpected-head",
+                rendered,
+            )
+            self.assertIn(
+                "warning: GitHub PR base branch develop does not match configured main branch main",
+                rendered,
+            )
+
+    def test_status_uses_last_mission_when_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            agent_identity=config.agent_identity,
+                            phase="idle",
+                            last_mission=MissionSummary(
+                                issue_number=31,
+                                pr_number=44,
+                                branch="feature/issue-31-publish-phase",
+                                phase="publish",
+                                conclusion="needs-human",
+                            ),
+                        )
+                    )
+
+                    client = Mock()
+                    client.get_issue.return_value = {
+                        "number": 31,
+                        "state": "OPEN",
+                        "labels": [{"name": "shinobi:needs-human"}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": False,
+                        "headRefName": "feature/issue-31-publish-phase",
+                        "baseRefName": "main",
+                    }
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["status"])
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("last_mission_issue_number: 31", rendered)
+            self.assertIn("last_mission_conclusion: needs-human", rendered)
+            self.assertIn("github_status_target: last_mission", rendered)
+            self.assertIn("github_pr_number: 44", rendered)
+
+    def test_status_warns_when_github_reconciliation_fails_but_keeps_local_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-status-github-reconciliation",
+                            agent_identity=config.agent_identity,
+                            run_id="run-123",
+                            phase="publish",
+                        )
+                    )
+
+                    client = Mock()
+                    client.get_issue.side_effect = GitHubClientError("boom issue")
+                    client.get_pull_request.side_effect = GitHubClientError("boom pr")
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["status"])
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("phase: publish", rendered)
+            self.assertIn("warning: failed to load issue #33: boom issue", rendered)
+            self.assertIn("warning: failed to load PR #44: boom pr", rendered)
 
     def test_status_does_not_recreate_missing_support_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

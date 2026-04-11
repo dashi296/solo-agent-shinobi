@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from .config import discover_workspace_root
 from .executor import execute_verification
+from .github_client import GitHubClient, GitHubClientError
 from .issue_selector import (
     ensure_open_issue,
     load_issue,
@@ -29,6 +31,16 @@ from .mission_start import (
 )
 from .models import Config, ExecutionResult, State
 from .state_store import StateStore
+
+
+@dataclass(frozen=True)
+class StatusMissionRef:
+    source: str
+    issue_number: int | None
+    pr_number: int | None
+    branch: str | None
+    phase: str | None
+    conclusion: str | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,15 +102,223 @@ def command_status(root: Path) -> int:
 
     if state is None:
         print(f"warning: failed to load local state: {state_error}")
-        print("github_status: unavailable in foundations MVP")
         return 1
 
+    render_local_status(state)
+    mission_ref = resolve_status_mission_ref(state)
+    render_github_status(root, config, mission_ref)
+    return 0
+
+
+def render_local_status(state: State) -> None:
     print(f"phase: {state.phase}")
     print(f"issue_number: {state.issue_number}")
     print(f"pr_number: {state.pr_number}")
     print(f"branch: {state.branch}")
-    print("github_status: unavailable in foundations MVP")
-    return 0
+
+    if state.last_mission is None:
+        return
+
+    print(f"last_mission_issue_number: {state.last_mission.issue_number}")
+    print(f"last_mission_pr_number: {state.last_mission.pr_number}")
+    print(f"last_mission_branch: {state.last_mission.branch}")
+    print(f"last_mission_phase: {state.last_mission.phase}")
+    print(f"last_mission_conclusion: {state.last_mission.conclusion}")
+
+
+def resolve_status_mission_ref(state: State) -> StatusMissionRef | None:
+    if state.issue_number is not None or state.pr_number is not None or state.branch is not None:
+        return StatusMissionRef(
+            source="active",
+            issue_number=state.issue_number,
+            pr_number=state.pr_number,
+            branch=state.branch,
+            phase=state.phase,
+        )
+
+    if state.last_mission is None:
+        return None
+
+    return StatusMissionRef(
+        source="last_mission",
+        issue_number=state.last_mission.issue_number,
+        pr_number=state.last_mission.pr_number,
+        branch=state.last_mission.branch,
+        phase=state.last_mission.phase,
+        conclusion=state.last_mission.conclusion,
+    )
+
+
+def render_github_status(
+    root: Path,
+    config: Config | None,
+    mission_ref: StatusMissionRef | None,
+) -> None:
+    if config is None:
+        print("github_status: unavailable (config missing)")
+        return
+
+    if mission_ref is None or (
+        mission_ref.issue_number is None
+        and mission_ref.pr_number is None
+        and mission_ref.branch is None
+    ):
+        print("github_status: no active or recent mission to reconcile")
+        return
+
+    print(f"github_status_target: {mission_ref.source}")
+    client = GitHubClient(root, repo=config.repo)
+    issue = load_status_issue(client, mission_ref.issue_number)
+    pull_request = load_status_pull_request(client, mission_ref.pr_number)
+
+    if issue is None and pull_request is None:
+        return
+
+    warnings = build_status_warnings(
+        mission_ref=mission_ref,
+        config=config,
+        issue=issue,
+        pull_request=pull_request,
+    )
+    for warning in warnings:
+        print(f"warning: {warning}")
+
+
+def load_status_issue(
+    client: GitHubClient, issue_number: int | None
+) -> dict[str, Any] | None:
+    if issue_number is None:
+        print("github_issue: unavailable (no tracked issue)")
+        return None
+
+    try:
+        issue = client.get_issue(issue_number)
+    except GitHubClientError as error:
+        print(f"warning: failed to load issue #{issue_number}: {error}")
+        return None
+
+    labels = ", ".join(sorted(get_status_label_names(issue))) or "(none)"
+    print(f"github_issue_number: {issue_number}")
+    print(f"github_issue_state: {issue.get('state', 'unknown')}")
+    print(f"github_issue_labels: {labels}")
+    return issue
+
+
+def load_status_pull_request(
+    client: GitHubClient, pr_number: int | None
+) -> dict[str, Any] | None:
+    if pr_number is None:
+        print("github_pr: unavailable (no tracked PR)")
+        return None
+
+    try:
+        pull_request = client.get_pull_request(str(pr_number))
+    except GitHubClientError as error:
+        print(f"warning: failed to load PR #{pr_number}: {error}")
+        return None
+
+    readiness = "draft" if pull_request.get("isDraft") else "ready"
+    print(f"github_pr_number: {pull_request.get('number', pr_number)}")
+    print(f"github_pr_state: {readiness}")
+    print(f"github_pr_url: {pull_request.get('url', 'unavailable')}")
+    print(f"github_pr_head: {pull_request.get('headRefName', 'unknown')}")
+    print(f"github_pr_base: {pull_request.get('baseRefName', 'unknown')}")
+    return pull_request
+
+
+def get_status_label_names(issue: dict[str, Any]) -> set[str]:
+    return {
+        label.get("name", "")
+        for label in issue.get("labels", [])
+        if isinstance(label, dict)
+    }
+
+
+def build_status_warnings(
+    *,
+    mission_ref: StatusMissionRef,
+    config: Config,
+    issue: dict[str, Any] | None,
+    pull_request: dict[str, Any] | None,
+) -> list[str]:
+    warnings: list[str] = []
+    if issue is not None:
+        warnings.extend(
+            build_issue_status_warnings(
+                mission_ref=mission_ref,
+                config=config,
+                issue=issue,
+            )
+        )
+    if pull_request is not None:
+        warnings.extend(
+            build_pr_status_warnings(
+                mission_ref=mission_ref,
+                config=config,
+                pull_request=pull_request,
+            )
+        )
+    return warnings
+
+
+def build_issue_status_warnings(
+    *, mission_ref: StatusMissionRef, config: Config, issue: dict[str, Any]
+) -> list[str]:
+    warnings: list[str] = []
+    issue_state = str(issue.get("state", "")).upper()
+    if (
+        mission_ref.source == "active"
+        and mission_ref.phase != "idle"
+        and issue_state != "OPEN"
+    ):
+        warnings.append(
+            f"local mission is active in phase {mission_ref.phase} but issue "
+            f"#{mission_ref.issue_number} is {str(issue.get('state', 'unknown')).lower()} on GitHub"
+        )
+
+    expected_label = expected_status_label(mission_ref, config)
+    if expected_label is not None:
+        label_names = get_status_label_names(issue)
+        if expected_label not in label_names:
+            warnings.append(
+                f"issue #{mission_ref.issue_number} is missing expected label {expected_label} "
+                f"for phase {mission_ref.phase}"
+            )
+
+    return warnings
+
+
+def build_pr_status_warnings(
+    *,
+    mission_ref: StatusMissionRef,
+    config: Config,
+    pull_request: dict[str, Any],
+) -> list[str]:
+    warnings: list[str] = []
+    head_ref = pull_request.get("headRefName")
+    if mission_ref.branch is not None and head_ref != mission_ref.branch:
+        warnings.append(
+            f"local branch {mission_ref.branch} does not match GitHub PR head {head_ref}"
+        )
+
+    base_ref = pull_request.get("baseRefName")
+    if base_ref is not None and base_ref != config.main_branch:
+        warnings.append(
+            f"GitHub PR base branch {base_ref} does not match configured main branch "
+            f"{config.main_branch}"
+        )
+
+    return warnings
+
+
+def expected_status_label(mission_ref: StatusMissionRef, config: Config) -> str | None:
+    if mission_ref.source != "active":
+        return None
+    if mission_ref.phase == "start":
+        return config.labels["working"]
+    if mission_ref.phase == "publish":
+        return config.labels["reviewing"]
+    return None
 
 
 def command_run(root: Path, issue_number: Optional[int]) -> int:
