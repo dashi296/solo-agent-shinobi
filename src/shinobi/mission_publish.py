@@ -341,7 +341,19 @@ def create_or_update_pull_request(
             f"failed to look up existing PR for issue #{issue_number}: {error}"
         ) from error
 
-    if not existing_prs:
+    matching_prs = [
+        pr
+        for pr in existing_prs
+        if str(pr.get("headRefName") or "") == branch
+        and str(pr.get("baseRefName") or "") == config.main_branch
+    ]
+    if len(matching_prs) > 1:
+        raise MissionPublishError(
+            "failed to choose existing PR for "
+            f"issue #{issue_number}: multiple open PRs match {branch} -> {config.main_branch}"
+        )
+
+    if not matching_prs:
         try:
             return client.create_pull_request(
                 title=title,
@@ -355,7 +367,7 @@ def create_or_update_pull_request(
                 f"failed to create PR for issue #{issue_number}: {error}"
             ) from error
 
-    existing_pr = existing_prs[0]
+    existing_pr = matching_prs[0]
     try:
         updated_pr = client.update_pull_request(
             int(existing_pr["number"]),
