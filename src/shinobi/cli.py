@@ -969,9 +969,14 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
             return 1
 
         selected_issue = local_only_issue if local_only_issue is not None else issue_number
+        blocking_active_issue_numbers = active_issue_numbers
+        if local_only_issue is not None:
+            blocking_active_issue_numbers = [
+                number for number in active_issue_numbers if number != local_only_issue
+            ]
         if selected_issue is None:
-            if active_issue_numbers:
-                rendered = ", ".join(f"#{number}" for number in active_issue_numbers)
+            if blocking_active_issue_numbers:
+                rendered = ", ".join(f"#{number}" for number in blocking_active_issue_numbers)
                 print(
                     "run aborted: active GitHub mission exists for "
                     f"{rendered}; recovery/resume is not implemented yet"
@@ -986,8 +991,8 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 print(f"run aborted: no open issues labeled {config.labels['ready']}")
                 return 1
         else:
-            if active_issue_numbers:
-                rendered = ", ".join(f"#{number}" for number in active_issue_numbers)
+            if blocking_active_issue_numbers:
+                rendered = ", ".join(f"#{number}" for number in blocking_active_issue_numbers)
                 print(
                     "run aborted: active GitHub mission exists for "
                     f"{rendered}; targeted resume/cancel is not implemented yet"
@@ -1001,6 +1006,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                         config.labels["working"],
                         config.labels["reviewing"],
                     ),
+                    allow_active_labels=local_only_issue is not None,
                     repo=config.repo,
                 )
             except RuntimeError as error:
