@@ -3400,6 +3400,66 @@ class MissionFinalizeTest(unittest.TestCase):
         self.assertIn("PR", rendered.upper())
         self.assertIn("manual follow-up is required", rendered)
 
+    def test_finalize_accepts_custom_terminal_label_value_but_persists_canonical_conclusion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            config = Config(
+                repo="owner/repo",
+                agent_identity="owner/repo#default@host-12345678",
+                labels={
+                    "ready": "label:ready",
+                    "working": "label:working",
+                    "reviewing": "label:reviewing",
+                    "blocked": "label:blocked",
+                    "needs_human": "label:needs-human",
+                    "merged": "label:merged",
+                    "risky": "label:risky",
+                },
+            )
+            store.initialize()
+            run_id = "run-123"
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            store.save_lock(
+                store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)[0]
+            )
+            state = State(
+                issue_number=32,
+                pr_number=45,
+                branch="feature/issue-32-finalize-phase",
+                agent_identity=config.agent_identity,
+                run_id=run_id,
+                phase="publish",
+            )
+
+            with patch("shinobi.mission_finalize.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 32,
+                    "labels": [{"name": "label:reviewing"}],
+                }
+
+                finalized = finalize_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    state=state,
+                    conclusion="label:needs-human",
+                )
+
+            self.assertEqual(finalized.conclusion, "needs-human")
+            self.assertEqual(
+                client.update_issue_labels.call_args_list,
+                [
+                    unittest.mock.call(32, add=["label:needs-human"]),
+                    unittest.mock.call(32, remove=["label:reviewing"]),
+                ],
+            )
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+
 
 class ContextBuilderTest(unittest.TestCase):
     def test_build_mission_context_reads_issue_and_local_knowledge(self) -> None:

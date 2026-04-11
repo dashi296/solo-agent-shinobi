@@ -41,9 +41,8 @@ def finalize_mission(
     conclusion: str,
     reason: str | None = None,
 ) -> FinalizedMission:
-    normalized_conclusion = normalize_conclusion_key(conclusion)
-    require_supported_conclusion(normalized_conclusion, config)
-    rendered_conclusion = normalize_conclusion(normalized_conclusion)
+    conclusion_key = resolve_conclusion_key(conclusion, config)
+    rendered_conclusion = normalize_conclusion(conclusion_key)
     mission = resolve_finalizable_mission(state)
     store.require_lock_owner(run_id, config.agent_identity)
 
@@ -54,17 +53,17 @@ def finalize_mission(
         issue_number=mission.issue_number,
         config=config,
         current_label_names=issue_label_names,
-        conclusion=normalized_conclusion,
+        conclusion=conclusion_key,
     )
     post_finalize_comment(
         client=client,
         issue_number=mission.issue_number,
         pr_number=mission.pr_number,
         branch=mission.branch,
-        conclusion=normalized_conclusion,
+        conclusion=conclusion_key,
         reason=reason,
     )
-    if normalized_conclusion == "merged":
+    if conclusion_key == "merged":
         close_finalized_issue(client, mission.issue_number)
 
     finalized_state = build_finalized_state(
@@ -108,6 +107,18 @@ def require_supported_conclusion(conclusion: str, config: Config) -> None:
     raise MissionFinalizeError(
         f"unsupported finalize conclusion {conclusion!r}; expected one of {allowed}"
     )
+
+
+def resolve_conclusion_key(conclusion: str, config: Config) -> str:
+    normalized = normalize_conclusion_key(conclusion)
+    require_supported_conclusion(normalized, config)
+    if normalized in TERMINAL_CONCLUSION_LABEL_KEYS:
+        return normalized
+
+    for key in TERMINAL_CONCLUSION_LABEL_KEYS:
+        if config.labels.get(key) == normalized:
+            return key
+    return normalized
 
 
 def resolve_finalizable_mission(state: State) -> FinalizableMission:
