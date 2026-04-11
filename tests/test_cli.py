@@ -957,11 +957,20 @@ class CliTest(unittest.TestCase):
                     bucket="fail",
                     link="https://ci.example.test/check/333",
                 ),
+                PullRequestCheck(
+                    name="other-repo",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/other/repo/actions/runs/444",
+                ),
             ],
             status="failure",
         )
 
-        self.assertEqual(cli.failed_actions_run_ids(status), ["123456789"])
+        self.assertEqual(
+            cli.failed_actions_run_ids(status, repo="owner/repo"),
+            ["123456789"],
+        )
 
     def test_review_failed_ci_finalizes_needs_human_when_retry_verification_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

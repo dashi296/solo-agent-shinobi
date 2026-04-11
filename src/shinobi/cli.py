@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, List, Optional
+from urllib.parse import urlparse
 
 from .config import discover_workspace_root
 from .executor import detect_high_risk_stop, execute_verification
@@ -683,7 +684,7 @@ def handle_failed_ci_review(
         print(reason)
         return 1
 
-    retry_run_ids = failed_actions_run_ids(ci_status)
+    retry_run_ids = failed_actions_run_ids(ci_status, repo=config.repo)
     if not retry_run_ids:
         stop_lease_expires_at = store.format_timestamp(
             datetime.now(timezone.utc) + timedelta(minutes=config.mission_lease_minutes)
@@ -762,13 +763,13 @@ def handle_failed_ci_review(
     return 1
 
 
-def failed_actions_run_ids(ci_status: Any) -> list[str]:
+def failed_actions_run_ids(ci_status: Any, *, repo: str) -> list[str]:
     run_ids: list[str] = []
     seen: set[str] = set()
     for check in ci_status.checks:
         if check.bucket not in {"fail", "cancel"} or not check.link:
             continue
-        run_id = parse_actions_run_id(check.link)
+        run_id = parse_actions_run_id(check.link, repo=repo)
         if run_id is None or run_id in seen:
             continue
         seen.add(run_id)
@@ -776,12 +777,12 @@ def failed_actions_run_ids(ci_status: Any) -> list[str]:
     return run_ids
 
 
-def parse_actions_run_id(link: str) -> str | None:
-    marker = "/actions/runs/"
-    marker_index = link.find(marker)
-    if marker_index == -1:
+def parse_actions_run_id(link: str, *, repo: str) -> str | None:
+    marker = f"/{repo.strip('/')}/actions/runs/"
+    parsed = urlparse(link)
+    if not parsed.path.startswith(marker):
         return None
-    suffix = link[marker_index + len(marker):]
+    suffix = parsed.path[len(marker):]
     run_id = ""
     for character in suffix:
         if not character.isdigit():
