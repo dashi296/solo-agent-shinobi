@@ -60,8 +60,42 @@ def publish_mission(
         issue_label_names = load_publishable_issue_label_names(
             client=client,
             issue_number=issue_number,
-            config=config,
         )
+    except MissionPublishError as error:
+        raise MissionPublishError(
+            handoff_publish_failure(
+                client=client,
+                store=store,
+                issue_number=issue_number,
+                config=config,
+                branch=branch,
+                lease_expires_at=lease_expires_at,
+                agent_identity=config.agent_identity,
+                run_id=run_id,
+                known_label_names={config.labels["working"]},
+                error=error,
+                reason=(
+                    "Shinobi failed to complete publish phase before creating or "
+                    f"updating a PR for branch {branch}: {error}"
+                ),
+            )
+        ) from error
+
+    blocking_labels = find_blocking_publish_labels(
+        label_names=issue_label_names,
+        config=config,
+    )
+    if blocking_labels:
+        stop_publish_for_blocking_labels(
+            store=store,
+            issue_number=issue_number,
+            branch=branch,
+            agent_identity=config.agent_identity,
+            blocking_labels=blocking_labels,
+            blocked_label=config.labels["blocked"],
+        )
+
+    try:
         push_branch(root, branch)
     except MissionPublishError as error:
         raise MissionPublishError(
@@ -298,7 +332,6 @@ def load_publishable_issue_label_names(
     *,
     client: GitHubClient,
     issue_number: int,
-    config: Config,
 ) -> set[str]:
     try:
         issue = client.get_issue(issue_number)
@@ -307,20 +340,64 @@ def load_publishable_issue_label_names(
             f"failed to load issue #{issue_number} before publish: {error}"
         ) from error
 
-    label_names = get_issue_label_names(issue)
-    blocking_labels = sorted(
+    return get_issue_label_names(issue)
+
+
+def find_blocking_publish_labels(
+    *,
+    label_names: set[str],
+    config: Config,
+) -> list[str]:
+    return sorted(
         config.labels[key]
         for key in BLOCKING_PUBLISH_LABEL_KEYS
         if key in config.labels and config.labels[key] in label_names
     )
-    if blocking_labels:
-        joined = ", ".join(blocking_labels)
-        raise MissionPublishError(
-            f"publish phase cannot proceed because issue #{issue_number} "
-            f"has blocking label(s): {joined}"
-        )
 
-    return label_names
+
+def stop_publish_for_blocking_labels(
+    *,
+    store: StateStore,
+    issue_number: int,
+    branch: str,
+    agent_identity: str,
+    blocking_labels: list[str],
+    blocked_label: str,
+) -> None:
+    joined = ", ".join(blocking_labels)
+    conclusion = "blocked" if blocked_label in blocking_labels else "needs-human"
+    reason = (
+        f"publish phase cannot proceed because issue #{issue_number} "
+        f"has blocking label(s): {joined}"
+    )
+    try:
+        store.save_state(
+            State(
+                issue_number=None,
+                pr_number=None,
+                branch=None,
+                agent_identity=agent_identity,
+                run_id=None,
+                phase="idle",
+                review_loop_count=0,
+                retryable_local_only=False,
+                lease_expires_at=None,
+                last_result=conclusion,
+                last_error=reason,
+                last_mission=MissionSummary(
+                    issue_number=issue_number,
+                    pr_number=None,
+                    branch=branch,
+                    phase="publish",
+                    conclusion=conclusion,
+                ),
+            )
+        )
+    except OSError as error:
+        raise MissionPublishError(
+            f"{reason}; additionally failed to persist local stopped state: {error}"
+        ) from error
+    raise MissionPublishError(reason)
 
 
 def create_or_update_pull_request(

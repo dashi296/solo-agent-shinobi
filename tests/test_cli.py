@@ -2661,15 +2661,64 @@ class MissionPublishTest(unittest.TestCase):
         run_mock.assert_not_called()
         client.list_pull_requests_by_head.assert_not_called()
         client.create_pull_request.assert_not_called()
-        self.assertEqual(
-            client.update_issue_labels.call_args_list,
-            [
-                unittest.mock.call(31, add=["shinobi:needs-human"]),
-                unittest.mock.call(31, remove=["shinobi:working"]),
-            ],
-        )
-        client.create_issue_comment.assert_called_once()
+        client.update_issue_labels.assert_not_called()
+        client.create_issue_comment.assert_not_called()
         store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "needs-human")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+
+    def test_publish_mission_preserves_blocked_label_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 31,
+                    "labels": [{"name": "shinobi:blocked"}],
+                }
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "has blocking label\\(s\\): shinobi:blocked",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        run_mock.assert_not_called()
+        client.update_issue_labels.assert_not_called()
+        client.create_issue_comment.assert_not_called()
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "blocked")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "blocked")
 
     def test_publish_mission_hands_off_when_push_fails_before_pr_creation(self) -> None:
         store = Mock()
