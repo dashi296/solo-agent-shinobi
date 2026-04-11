@@ -958,10 +958,17 @@ class CliTest(unittest.TestCase):
                                             return_value=stop_decision,
                                         ):
                                             with patch(
-                                                "shinobi.cli.handoff_started_mission"
+                                                "shinobi.cli.handoff_published_mission"
                                             ) as handoff_mock:
                                                 with patch(
-                                                    "shinobi.cli.publish_mission"
+                                                    "shinobi.cli.publish_mission",
+                                                    return_value=Mock(
+                                                        pr_number=31,
+                                                        pr_url="https://github.com/owner/repo/pull/31",
+                                                        branch=started_mission.branch,
+                                                        issue_number=started_mission.issue_number,
+                                                        lease_expires_at="2026-04-09T00:30:00Z",
+                                                    ),
                                                 ) as publish_mock:
                                                     with redirect_stdout(output):
                                                         exit_code = cli.main(["run"])
@@ -977,7 +984,7 @@ class CliTest(unittest.TestCase):
                 handoff_mock.call_args.kwargs["reason"],
                 stop_decision.reason,
             )
-            publish_mock.assert_not_called()
+            publish_mock.assert_called_once()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_refuses_active_github_mission_before_selecting_ready_issue(self) -> None:

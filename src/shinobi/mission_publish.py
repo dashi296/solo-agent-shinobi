@@ -259,6 +259,54 @@ def publish_mission(
     )
 
 
+def handoff_published_mission(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    published_mission: PublishedMission,
+    reason: str,
+) -> None:
+    client = GitHubClient(root, repo=config.repo)
+    known_label_names = load_handoff_label_names(
+        client=client,
+        issue_number=published_mission.issue_number,
+        fallback_label_names={config.labels["reviewing"]},
+    )
+    rollback_error = transition_publish_failure_to_needs_human(
+        client=client,
+        issue_number=published_mission.issue_number,
+        config=config,
+        reason=reason,
+        known_label_names=known_label_names,
+        lease_expires_at=published_mission.lease_expires_at,
+        agent_identity=config.agent_identity,
+        run_id=run_id,
+        pr_number=published_mission.pr_number,
+        branch=published_mission.branch,
+    )
+    state_error = None
+    if rollback_error is None:
+        state_error = save_publish_handoff_state(
+            store=store,
+            issue_number=published_mission.issue_number,
+            pr_number=published_mission.pr_number,
+            branch=published_mission.branch,
+            agent_identity=config.agent_identity,
+            reason=reason,
+        )
+
+    if rollback_error is not None:
+        raise MissionPublishError(
+            f"{reason}; failed to hand off published mission: {rollback_error}"
+        )
+    if state_error is not None:
+        raise MissionPublishError(
+            f"{reason}; failed to persist published mission handoff state: {state_error}"
+        )
+
+
 def require_publishable_state(
     state: State,
     *,
