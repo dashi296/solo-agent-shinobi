@@ -5869,7 +5869,7 @@ class GitHubClientTest(unittest.TestCase):
         )
 
         with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
-            with patch("shinobi.github_client.subprocess.run", return_value=result):
+            with patch("shinobi.github_client.subprocess.run", return_value=result) as run_mock:
                 client = GitHubClient(Path("/tmp/repo"))
                 status = client.get_ci_status(44)
 
@@ -5884,6 +5884,9 @@ class GitHubClientTest(unittest.TestCase):
                 }
             ],
         )
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:4], ["gh", "pr", "checks", "44"])
+        self.assertEqual(command[-2:], ["--repo", "owner/repo"])
 
     def test_get_ci_status_treats_no_checks_reported_as_empty_status(self) -> None:
         result = subprocess.CompletedProcess(
@@ -6160,6 +6163,67 @@ class GitHubClientTest(unittest.TestCase):
         self.assertIn("feature/issue-25", create_command)
         self.assertEqual(create_command[-2:], ["--repo", "owner/repo"])
 
+    def test_get_pull_request_scopes_view_command_to_repo(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "pr", "view", "42"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 42,
+                    "url": "https://github.com/owner/repo/pull/42",
+                    "isDraft": False,
+                    "headRefName": "feature/issue-25",
+                    "baseRefName": "main",
+                }
+            ),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                pr = client.get_pull_request("42")
+
+        self.assertEqual(pr["number"], 42)
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:4], ["gh", "pr", "view", "42"])
+        self.assertEqual(command[-2:], ["--repo", "owner/repo"])
+
+    def test_update_pull_request_scopes_edit_command_to_repo(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(args=["gh", "pr", "edit", "42"], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(
+                args=["gh", "pr", "view", "42"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "number": 42,
+                        "url": "https://github.com/owner/repo/pull/42",
+                        "isDraft": False,
+                        "headRefName": "feature/issue-25",
+                        "baseRefName": "main",
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                pr = client.update_pull_request(42, title="updated title", body="updated body", base="develop")
+
+        self.assertEqual(pr["number"], 42)
+        command = run_mock.call_args_list[0].args[0]
+        self.assertEqual(command[:4], ["gh", "pr", "edit", "42"])
+        self.assertIn("--title", command)
+        self.assertIn("updated title", command)
+        self.assertIn("--body", command)
+        self.assertIn("updated body", command)
+        self.assertIn("--base", command)
+        self.assertIn("develop", command)
+        self.assertEqual(command[-2:], ["--repo", "owner/repo"])
+
     def test_list_pull_requests_by_head_returns_open_prs_for_branch(self) -> None:
         response = subprocess.CompletedProcess(
             args=["gh", "pr", "list"],
@@ -6280,6 +6344,25 @@ class GitHubClientTest(unittest.TestCase):
         self.assertEqual(ready_command[:4], ["gh", "pr", "ready", "42"])
         self.assertNotIn("--undo", ready_command)
         self.assertEqual(ready_command[-2:], ["--repo", "owner/repo"])
+
+    def test_merge_pull_request_scopes_merge_command_to_repo(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "pr", "merge", "42"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.merge_pull_request(42, merge_method="squash", delete_branch=True)
+
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:4], ["gh", "pr", "merge", "42"])
+        self.assertIn("--squash", command)
+        self.assertIn("--delete-branch", command)
+        self.assertEqual(command[-2:], ["--repo", "owner/repo"])
 
     def test_init_keeps_shinobi_directory_ignored_by_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
