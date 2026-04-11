@@ -57,21 +57,21 @@ def collect_changed_paths(root: Path, *, base_ref: str) -> list[str]:
         )
     )
     changed_paths.update(
-        run_changed_paths_command(
+        run_diff_paths_command(
             root,
-            ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD"],
+            ["git", "diff", "--cached", "--name-status", "--diff-filter=ACMRD"],
             error_context="failed to collect staged changed paths",
         )
     )
     changed_paths.update(
-        run_changed_paths_command(
+        run_diff_paths_command(
             root,
-            ["git", "diff", "--name-only", "--diff-filter=ACMRD"],
+            ["git", "diff", "--name-status", "--diff-filter=ACMRD"],
             error_context="failed to collect unstaged changed paths",
         )
     )
     changed_paths.update(
-        run_changed_paths_command(
+        run_line_paths_command(
             root,
             ["git", "ls-files", "--others", "--exclude-standard"],
             error_context="failed to collect untracked changed paths",
@@ -89,9 +89,9 @@ def collect_paths_against_base_ref(root: Path, *, base_ref: str) -> list[str]:
     errors: list[str] = []
     for candidate_ref in candidate_refs:
         try:
-            return run_changed_paths_command(
+            return run_diff_paths_command(
                 root,
-                ["git", "diff", "--name-only", "--diff-filter=ACMRD", f"{candidate_ref}...HEAD"],
+                ["git", "diff", "--name-status", "--diff-filter=ACMRD", f"{candidate_ref}...HEAD"],
                 error_context=f"failed to collect changed paths against {candidate_ref}",
             )
         except RuntimeError as error:
@@ -110,12 +110,32 @@ def is_missing_revision_error(message: str) -> bool:
     return "unknown revision" in lowered or "bad revision" in lowered
 
 
-def run_changed_paths_command(
+def run_diff_paths_command(
     root: Path,
     command: list[str],
     *,
     error_context: str,
 ) -> list[str]:
+    result = run_git_command(root, command, error_context=error_context)
+    return parse_name_status_paths(result.stdout)
+
+
+def run_line_paths_command(
+    root: Path,
+    command: list[str],
+    *,
+    error_context: str,
+) -> list[str]:
+    result = run_git_command(root, command, error_context=error_context)
+    return [normalize_repo_path(line) for line in result.stdout.splitlines() if line.strip()]
+
+
+def run_git_command(
+    root: Path,
+    command: list[str],
+    *,
+    error_context: str,
+) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(
             command,
@@ -131,7 +151,24 @@ def run_changed_paths_command(
         message = result.stderr.strip() or result.stdout.strip() or f"git exited with {result.returncode}"
         raise RuntimeError(f"{error_context}: {message}")
 
-    return [normalize_repo_path(line) for line in result.stdout.splitlines() if line.strip()]
+    return result
+
+
+def parse_name_status_paths(output: str) -> list[str]:
+    paths: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        status = fields[0]
+        changed_fields = fields[1:]
+        if not status or not changed_fields:
+            continue
+        if status[0] in {"R", "C"}:
+            paths.extend(normalize_repo_path(path) for path in changed_fields if path.strip())
+            continue
+        paths.append(normalize_repo_path(changed_fields[0]))
+    return paths
 
 
 def find_high_risk_paths(*, changed_paths: Iterable[str], high_risk_paths: Iterable[str]) -> list[str]:

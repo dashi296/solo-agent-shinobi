@@ -133,6 +133,7 @@ publish phase は start 済み mission を draft PR として公開します。
 - owner run の lock を確認してから publish する
 - 検証結果に `failed` または `error` が含まれる場合は push / PR 更新前に停止し、`needs-human` へ handoff する
 - 現在の Issue label に `shinobi:blocked` または `shinobi:needs-human` があれば push / PR 更新前に停止する
+- execute 後の差分に config の `high_risk_paths` 配下が含まれる場合は push / PR 更新前に停止し、`needs-human` へ handoff する
 - active branch を `origin` へ push する
 - branch に対応する既存 PR があれば更新し、なければ draft PR を作成する
 - `shinobi:reviewing` を付与し、`shinobi:risky` 以外の状態 label を正規化する

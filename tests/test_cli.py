@@ -4626,7 +4626,7 @@ class ExecutorTest(unittest.TestCase):
             subprocess.CompletedProcess(
                 args=["git", "diff"],
                 returncode=0,
-                stdout="auth/login.py\n",
+                stdout="M\tauth/login.py\n",
                 stderr="",
             ),
             subprocess.CompletedProcess(
@@ -4655,11 +4655,11 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(changed, ["auth/login.py"])
         self.assertEqual(
             run_mock.call_args_list[0].args[0],
-            ["git", "diff", "--name-only", "--diff-filter=ACMRD", "main...HEAD"],
+            ["git", "diff", "--name-status", "--diff-filter=ACMRD", "main...HEAD"],
         )
         self.assertEqual(
             run_mock.call_args_list[1].args[0],
-            ["git", "diff", "--name-only", "--diff-filter=ACMRD", "origin/main...HEAD"],
+            ["git", "diff", "--name-status", "--diff-filter=ACMRD", "origin/main...HEAD"],
         )
 
     def test_collect_changed_paths_includes_deleted_staged_unstaged_and_untracked_files(self) -> None:
@@ -4667,19 +4667,19 @@ class ExecutorTest(unittest.TestCase):
             subprocess.CompletedProcess(
                 args=["git", "diff"],
                 returncode=0,
-                stdout="src/app.py\nauth/deleted.py\n",
+                stdout="M\tsrc/app.py\nD\tauth/deleted.py\n",
                 stderr="",
             ),
             subprocess.CompletedProcess(
                 args=["git", "diff", "--cached"],
                 returncode=0,
-                stdout="auth/staged.py\n",
+                stdout="M\tauth/staged.py\n",
                 stderr="",
             ),
             subprocess.CompletedProcess(
                 args=["git", "diff"],
                 returncode=0,
-                stdout="auth/working_tree.py\n",
+                stdout="M\tauth/working_tree.py\n",
                 stderr="",
             ),
             subprocess.CompletedProcess(
@@ -4704,6 +4704,47 @@ class ExecutorTest(unittest.TestCase):
             ],
         )
 
+    def test_collect_changed_paths_includes_both_paths_for_renames_and_copies(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="R100\tauth/legacy.py\tsrc/legacy.py\nC100\tbilling/base.py\tbilling/copied.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            changed = collect_changed_paths(Path("/tmp/repo"), base_ref="main")
+
+        self.assertEqual(
+            changed,
+            [
+                "auth/legacy.py",
+                "billing/base.py",
+                "billing/copied.py",
+                "src/legacy.py",
+            ],
+        )
+
     def test_find_high_risk_paths_matches_directory_prefixes(self) -> None:
         matched = find_high_risk_paths(
             changed_paths=["src/app.py", "auth/login.py", "billing/invoice.py"],
@@ -4724,7 +4765,7 @@ class ExecutorTest(unittest.TestCase):
         response = subprocess.CompletedProcess(
             args=["git", "diff"],
             returncode=0,
-            stdout="src/app.py\nauth/login.py\n",
+            stdout="M\tsrc/app.py\nM\tauth/login.py\n",
             stderr="",
         )
 
@@ -4753,7 +4794,7 @@ class ExecutorTest(unittest.TestCase):
             subprocess.CompletedProcess(
                 args=["git", "diff"],
                 returncode=0,
-                stdout="src/app.py\ntests/test_cli.py\n",
+                stdout="M\tsrc/app.py\nM\ttests/test_cli.py\n",
                 stderr="",
             ),
             subprocess.CompletedProcess(
@@ -4789,7 +4830,7 @@ class ExecutorTest(unittest.TestCase):
             subprocess.CompletedProcess(
                 args=["git", "diff"],
                 returncode=0,
-                stdout="src/app.py\nauth/deleted.py\n",
+                stdout="M\tsrc/app.py\nD\tauth/deleted.py\n",
                 stderr="",
             ),
             subprocess.CompletedProcess(
@@ -4828,6 +4869,54 @@ class ExecutorTest(unittest.TestCase):
                 conclusion="needs-human",
                 retryable=False,
                 changed_paths=["auth/deleted.py", "auth/new_file.py"],
+                matched_paths=["auth/"],
+            ),
+        )
+
+    def test_detect_high_risk_stop_detects_renamed_paths_moved_out_of_high_risk_directory(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="R100\tauth/login.py\tsrc/login.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            decision = detect_high_risk_stop(
+                Path("/tmp/repo"),
+                Config(repo="owner/repo", high_risk_paths=["auth/", "billing/"]),
+            )
+
+        self.assertEqual(
+            decision,
+            StopDecision(
+                reason=(
+                    "Shinobi stopped before publish because changed files match "
+                    "high-risk path(s): auth/ (files: auth/login.py)"
+                ),
+                conclusion="needs-human",
+                retryable=False,
+                changed_paths=["auth/login.py"],
                 matched_paths=["auth/"],
             ),
         )
