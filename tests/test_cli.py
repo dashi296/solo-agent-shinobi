@@ -3556,6 +3556,75 @@ class MissionStartTest(unittest.TestCase):
             self.assertEqual(saved_state.last_result, "started")
             self.assertIsNone(saved_state.last_error)
 
+    def test_resume_local_only_mission_accepts_working_issue_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                config, _ = store.initialize()
+
+            run_id = "run-456"
+            now = datetime(2026, 4, 11, 0, 0, tzinfo=timezone.utc)
+            store.save_lock(store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)[0])
+            retryable_state = State(
+                issue_number=40,
+                pr_number=None,
+                branch="feature/issue-40-recover-local-only-mission",
+                agent_identity=config.agent_identity,
+                run_id="run-123",
+                phase="start",
+                review_loop_count=0,
+                retryable_local_only=True,
+                lease_expires_at=None,
+                last_result="start_pending",
+                last_error="persist failed once",
+            )
+            store.save_state(retryable_state)
+            (store.paths.logs_dir / "retryable-start-failures.jsonl").write_text(
+                json.dumps(
+                    {
+                        "started_at": "2026-04-10T23:59:00Z",
+                        "issue_number": 40,
+                        "branch": retryable_state.branch,
+                        "phase": "start",
+                        "agent_identity": config.agent_identity,
+                        "run_id": "run-123",
+                        "retryable_local_only": True,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_client = FakeGitHubClient(
+                issue_number=40,
+                title="[TASK] recover local-only mission を実装する",
+                labels=[config.labels["working"]],
+            )
+
+            with patch("shinobi.mission_start.GitHubClient", return_value=fake_client):
+                started = resume_local_only_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    issue={
+                        "number": 40,
+                        "title": "[TASK] recover local-only mission を実装する",
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["working"]}],
+                    },
+                    state=retryable_state,
+                    now=now,
+                )
+
+            self.assertEqual(started.issue_number, 40)
+            self.assertEqual(started.branch, "feature/issue-40-recover-local-only-mission")
+            self.assertEqual(fake_client.issue_labels, {config.labels["working"]})
+            self.assertEqual(
+                fake_client.label_operations,
+                [("add", 40, (config.labels["working"],))],
+            )
+
     def test_start_mission_normalizes_all_non_risky_state_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

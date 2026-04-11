@@ -210,7 +210,7 @@ def resume_local_only_mission(
     now: datetime | None = None,
 ) -> StartedMission:
     started_at = now or datetime.now(timezone.utc)
-    issue_number = require_startable_issue(issue, config)
+    issue_number = require_resumable_local_only_issue(issue, config)
     if state.issue_number != issue_number:
         raise MissionStartError(
             "retryable local-only state issue does not match requested issue "
@@ -311,6 +311,30 @@ def build_branch_name(*, issue_number: int, issue_title: str) -> str:
 
 
 def require_startable_issue(issue: dict, config: Config) -> int:
+    return require_issue_with_allowed_status_labels(
+        issue,
+        config,
+        allowed_status_labels={config.labels["ready"]},
+        error_context="start",
+    )
+
+
+def require_resumable_local_only_issue(issue: dict, config: Config) -> int:
+    return require_issue_with_allowed_status_labels(
+        issue,
+        config,
+        allowed_status_labels={config.labels["ready"], config.labels["working"]},
+        error_context="resume local-only mission",
+    )
+
+
+def require_issue_with_allowed_status_labels(
+    issue: dict,
+    config: Config,
+    *,
+    allowed_status_labels: set[str],
+    error_context: str,
+) -> int:
     issue_number = int(issue["number"])
     if "pull_request" in issue:
         raise MissionStartError(f"issue #{issue_number} is a pull request, not an issue")
@@ -323,9 +347,15 @@ def require_startable_issue(issue: dict, config: Config) -> int:
         for label in issue.get("labels", [])
         if isinstance(label, dict)
     }
-    ready_label = config.labels["ready"]
-    if ready_label not in label_names:
-        raise MissionStartError(f"issue #{issue_number} is not labeled {ready_label}")
+    if not any(label in label_names for label in allowed_status_labels):
+        if len(allowed_status_labels) == 1:
+            expected_label = next(iter(allowed_status_labels))
+            raise MissionStartError(f"issue #{issue_number} is not labeled {expected_label}")
+        allowed = ", ".join(sorted(allowed_status_labels))
+        raise MissionStartError(
+            f"issue #{issue_number} is not in a {error_context} state; "
+            f"expected one of: {allowed}"
+        )
 
     blocked_label = config.labels["blocked"]
     needs_human_label = config.labels["needs_human"]
