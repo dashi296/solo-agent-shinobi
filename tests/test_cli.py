@@ -958,17 +958,10 @@ class CliTest(unittest.TestCase):
                                             return_value=stop_decision,
                                         ):
                                             with patch(
-                                                "shinobi.cli.handoff_published_mission"
+                                                "shinobi.cli.handoff_started_mission"
                                             ) as handoff_mock:
                                                 with patch(
                                                     "shinobi.cli.publish_mission",
-                                                    return_value=Mock(
-                                                        pr_number=31,
-                                                        pr_url="https://github.com/owner/repo/pull/31",
-                                                        branch=started_mission.branch,
-                                                        issue_number=started_mission.issue_number,
-                                                        lease_expires_at="2026-04-09T00:30:00Z",
-                                                    ),
                                                 ) as publish_mock:
                                                     with redirect_stdout(output):
                                                         exit_code = cli.main(["run"])
@@ -984,7 +977,7 @@ class CliTest(unittest.TestCase):
                 handoff_mock.call_args.kwargs["reason"],
                 stop_decision.reason,
             )
-            publish_mock.assert_called_once()
+            publish_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_hands_off_when_high_risk_detection_fails_before_publish(self) -> None:
