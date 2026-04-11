@@ -50,22 +50,57 @@ def detect_high_risk_stop(root: Path, config: Config) -> StopDecision | None:
 
 
 def collect_changed_paths(root: Path, *, base_ref: str) -> list[str]:
+    changed_paths = set(
+        run_changed_paths_command(
+            root,
+            ["git", "diff", "--name-only", "--diff-filter=ACMRD", f"{base_ref}...HEAD"],
+            error_context=f"failed to collect changed paths against {base_ref}",
+        )
+    )
+    changed_paths.update(
+        run_changed_paths_command(
+            root,
+            ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD"],
+            error_context="failed to collect staged changed paths",
+        )
+    )
+    changed_paths.update(
+        run_changed_paths_command(
+            root,
+            ["git", "diff", "--name-only", "--diff-filter=ACMRD"],
+            error_context="failed to collect unstaged changed paths",
+        )
+    )
+    changed_paths.update(
+        run_changed_paths_command(
+            root,
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            error_context="failed to collect untracked changed paths",
+        )
+    )
+    return sorted(changed_paths)
+
+
+def run_changed_paths_command(
+    root: Path,
+    command: list[str],
+    *,
+    error_context: str,
+) -> list[str]:
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=ACMR", f"{base_ref}...HEAD"],
+            command,
             cwd=root,
             check=False,
             capture_output=True,
             text=True,
         )
     except OSError as error:
-        raise RuntimeError(
-            f"failed to collect changed paths against {base_ref}: {error}"
-        ) from error
+        raise RuntimeError(f"{error_context}: {error}") from error
 
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or f"git exited with {result.returncode}"
-        raise RuntimeError(f"failed to collect changed paths against {base_ref}: {message}")
+        raise RuntimeError(f"{error_context}: {message}")
 
     return [normalize_repo_path(line) for line in result.stdout.splitlines() if line.strip()]
 

@@ -4451,6 +4451,48 @@ class ExecutorTest(unittest.TestCase):
             ):
                 collect_changed_paths(Path("/tmp/repo"), base_ref="main")
 
+    def test_collect_changed_paths_includes_deleted_staged_unstaged_and_untracked_files(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="src/app.py\nauth/deleted.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="auth/staged.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="auth/working_tree.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="auth/new_file.py\n",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            changed = collect_changed_paths(Path("/tmp/repo"), base_ref="main")
+
+        self.assertEqual(
+            changed,
+            [
+                "auth/deleted.py",
+                "auth/new_file.py",
+                "auth/staged.py",
+                "auth/working_tree.py",
+                "src/app.py",
+            ],
+        )
+
     def test_find_high_risk_paths_matches_directory_prefixes(self) -> None:
         matched = find_high_risk_paths(
             changed_paths=["src/app.py", "auth/login.py", "billing/invoice.py"],
@@ -4496,20 +4538,88 @@ class ExecutorTest(unittest.TestCase):
         )
 
     def test_detect_high_risk_stop_returns_none_for_safe_paths(self) -> None:
-        response = subprocess.CompletedProcess(
-            args=["git", "diff"],
-            returncode=0,
-            stdout="src/app.py\ntests/test_cli.py\n",
-            stderr="",
-        )
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="src/app.py\ntests/test_cli.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
 
-        with patch("shinobi.executor.subprocess.run", return_value=response):
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
             decision = detect_high_risk_stop(
                 Path("/tmp/repo"),
                 Config(repo="owner/repo", high_risk_paths=["auth/", "billing/"]),
             )
 
         self.assertIsNone(decision)
+
+    def test_detect_high_risk_stop_detects_deleted_and_untracked_high_risk_paths(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="src/app.py\nauth/deleted.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="auth/new_file.py\n",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            decision = detect_high_risk_stop(
+                Path("/tmp/repo"),
+                Config(repo="owner/repo", high_risk_paths=["auth/", "billing/"]),
+            )
+
+        self.assertEqual(
+            decision,
+            StopDecision(
+                reason=(
+                    "Shinobi stopped before publish because changed files match "
+                    "high-risk path(s): auth/ (files: auth/deleted.py, auth/new_file.py)"
+                ),
+                conclusion="needs-human",
+                retryable=False,
+                changed_paths=["auth/deleted.py", "auth/new_file.py"],
+                matched_paths=["auth/"],
+            ),
+        )
 
     def test_config_preserves_custom_verification_commands(self) -> None:
         config = Config.from_dict(
