@@ -1180,6 +1180,13 @@ def validate_retryable_local_only_state(
         )
     if not git_local_branch_exists(root, state.branch):
         return f"branch {state.branch} does not exist locally"
+    current_branch = git_current_branch(root)
+    if current_branch != state.branch:
+        current_branch_label = current_branch if current_branch is not None else "detached HEAD"
+        return (
+            "current branch does not match retryable local-only branch "
+            f"({current_branch_label} != {state.branch})"
+        )
     if not store.has_retryable_start_failure(
         issue_number=state.issue_number,
         branch=state.branch,
@@ -1231,6 +1238,20 @@ def git_local_branch_exists(root: Path, branch: str) -> bool:
         text=True,
     )
     return result.returncode == 0
+
+
+def git_current_branch(root: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    return branch or None
 
 
 def handoff_failed_verification(

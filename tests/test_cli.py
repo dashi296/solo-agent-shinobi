@@ -2305,52 +2305,56 @@ class CliTest(unittest.TestCase):
                                 return_value=True,
                             ):
                                 with patch(
-                                    "shinobi.cli.load_issue",
-                                    return_value={
-                                        "number": 6,
-                                        "title": "Run start phase",
-                                        "state": "OPEN",
-                                        "labels": [{"name": "shinobi:ready"}],
-                                    },
+                                    "shinobi.cli.git_current_branch",
+                                    return_value="feature/issue-6-run-start-phase",
                                 ):
                                     with patch(
-                                        "shinobi.cli.resume_local_only_mission",
-                                        return_value=Mock(
-                                            branch="feature/issue-6-run-start-phase",
-                                            issue_number=6,
-                                            lease_expires_at="2026-04-09T00:30:00Z",
-                                        ),
-                                    ) as resume_mock:
-                                        with patch("shinobi.cli.start_mission") as start_mock:
-                                            execution_result = Mock()
-                                            execution_result.succeeded = True
-                                            execution_result.commands = []
-                                            with patch(
-                                                "shinobi.cli.execute_verification",
-                                                return_value=execution_result,
-                                            ):
+                                        "shinobi.cli.load_issue",
+                                        return_value={
+                                            "number": 6,
+                                            "title": "Run start phase",
+                                            "state": "OPEN",
+                                            "labels": [{"name": "shinobi:ready"}],
+                                        },
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.resume_local_only_mission",
+                                            return_value=Mock(
+                                                branch="feature/issue-6-run-start-phase",
+                                                issue_number=6,
+                                                lease_expires_at="2026-04-09T00:30:00Z",
+                                            ),
+                                        ) as resume_mock:
+                                            with patch("shinobi.cli.start_mission") as start_mock:
+                                                execution_result = Mock()
+                                                execution_result.succeeded = True
+                                                execution_result.commands = []
                                                 with patch(
-                                                    "shinobi.cli.load_publishable_issue_label_names",
-                                                    return_value={"shinobi:working"},
+                                                    "shinobi.cli.execute_verification",
+                                                    return_value=execution_result,
                                                 ):
                                                     with patch(
-                                                        "shinobi.cli.detect_high_risk_stop",
-                                                        return_value=None,
+                                                        "shinobi.cli.load_publishable_issue_label_names",
+                                                        return_value={"shinobi:working"},
                                                     ):
                                                         with patch(
-                                                            "shinobi.cli.publish_mission",
-                                                            return_value=Mock(
-                                                                pr_number=31,
-                                                                pr_url=None,
-                                                                lease_expires_at=(
-                                                                    "2026-04-09T00:30:00Z"
-                                                                ),
-                                                            ),
+                                                            "shinobi.cli.detect_high_risk_stop",
+                                                            return_value=None,
                                                         ):
-                                                            with redirect_stdout(output):
-                                                                exit_code = cli.main(
-                                                                    ["run", "--issue", "6"]
-                                                                )
+                                                            with patch(
+                                                                "shinobi.cli.publish_mission",
+                                                                return_value=Mock(
+                                                                    pr_number=31,
+                                                                    pr_url=None,
+                                                                    lease_expires_at=(
+                                                                        "2026-04-09T00:30:00Z"
+                                                                    ),
+                                                                ),
+                                                            ):
+                                                                with redirect_stdout(output):
+                                                                    exit_code = cli.main(
+                                                                        ["run", "--issue", "6"]
+                                                                    )
 
             self.assertEqual(exit_code, 0)
             self.assertIn("selected_issue: 6", output.getvalue())
@@ -2397,51 +2401,55 @@ class CliTest(unittest.TestCase):
                                 return_value=True,
                             ):
                                 with patch(
-                                    "shinobi.cli.load_issue",
-                                    return_value={
-                                        "number": 6,
-                                        "title": "Run start phase",
-                                        "state": "OPEN",
-                                        "labels": [{"name": "shinobi:working"}],
-                                    },
+                                    "shinobi.cli.git_current_branch",
+                                    return_value="feature/issue-6-run-start-phase",
                                 ):
                                     with patch(
-                                        "shinobi.cli.resume_local_only_mission",
-                                        return_value=Mock(
-                                            branch="feature/issue-6-run-start-phase",
-                                            issue_number=6,
-                                            lease_expires_at="2026-04-09T00:30:00Z",
-                                        ),
-                                    ) as resume_mock:
-                                        execution_result = Mock()
-                                        execution_result.succeeded = True
-                                        execution_result.commands = []
+                                        "shinobi.cli.load_issue",
+                                        return_value={
+                                            "number": 6,
+                                            "title": "Run start phase",
+                                            "state": "OPEN",
+                                            "labels": [{"name": "shinobi:working"}],
+                                        },
+                                    ):
                                         with patch(
-                                            "shinobi.cli.execute_verification",
-                                            return_value=execution_result,
-                                        ):
+                                            "shinobi.cli.resume_local_only_mission",
+                                            return_value=Mock(
+                                                branch="feature/issue-6-run-start-phase",
+                                                issue_number=6,
+                                                lease_expires_at="2026-04-09T00:30:00Z",
+                                            ),
+                                        ) as resume_mock:
+                                            execution_result = Mock()
+                                            execution_result.succeeded = True
+                                            execution_result.commands = []
                                             with patch(
-                                                "shinobi.cli.load_publishable_issue_label_names",
-                                                return_value={"shinobi:working"},
+                                                "shinobi.cli.execute_verification",
+                                                return_value=execution_result,
                                             ):
                                                 with patch(
-                                                    "shinobi.cli.detect_high_risk_stop",
-                                                    return_value=None,
+                                                    "shinobi.cli.load_publishable_issue_label_names",
+                                                    return_value={"shinobi:working"},
                                                 ):
                                                     with patch(
-                                                        "shinobi.cli.publish_mission",
-                                                        return_value=Mock(
-                                                            pr_number=31,
-                                                            pr_url=None,
-                                                            lease_expires_at=(
-                                                                "2026-04-09T00:30:00Z"
-                                                            ),
-                                                        ),
+                                                        "shinobi.cli.detect_high_risk_stop",
+                                                        return_value=None,
                                                     ):
-                                                        with redirect_stdout(output):
-                                                            exit_code = cli.main(
-                                                                ["run", "--issue", "6"]
-                                                            )
+                                                        with patch(
+                                                            "shinobi.cli.publish_mission",
+                                                            return_value=Mock(
+                                                                pr_number=31,
+                                                                pr_url=None,
+                                                                lease_expires_at=(
+                                                                    "2026-04-09T00:30:00Z"
+                                                                ),
+                                                            ),
+                                                        ):
+                                                            with redirect_stdout(output):
+                                                                exit_code = cli.main(
+                                                                    ["run", "--issue", "6"]
+                                                                )
 
             self.assertEqual(exit_code, 0)
             self.assertIn("selected_issue: 6", output.getvalue())
@@ -2671,8 +2679,12 @@ class CliTest(unittest.TestCase):
 
                     output = io.StringIO()
                     with patch("shinobi.cli.git_local_branch_exists", return_value=True):
-                        with redirect_stdout(output):
-                            exit_code = cli.main(["run"])
+                        with patch(
+                            "shinobi.cli.git_current_branch",
+                            return_value="feature/issue-6-run-start-phase",
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
@@ -2691,6 +2703,69 @@ class CliTest(unittest.TestCase):
                 phase="start",
                 conclusion="aborted",
             ))
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_cleans_up_retryable_local_only_state_when_current_branch_differs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    state = store.load_state()
+                    state.issue_number = 6
+                    state.phase = "start"
+                    state.branch = "feature/issue-6-run-start-phase"
+                    state.run_id = "previous-run"
+                    state.retryable_local_only = True
+                    store.save_state(state)
+                    (store.paths.logs_dir / "retryable-start-failures.jsonl").write_text(
+                        json.dumps(
+                            {
+                                "issue_number": 6,
+                                "branch": state.branch,
+                                "phase": "start",
+                                "agent_identity": state.agent_identity,
+                                "run_id": "previous-run",
+                                "retryable_local_only": True,
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.git_local_branch_exists", return_value=True):
+                        with patch(
+                            "shinobi.cli.git_current_branch",
+                            return_value="feature/issue-999-other-work",
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: retryable local-only mission for issue #6 could not be resumed: "
+                "current branch does not match retryable local-only branch "
+                "(feature/issue-999-other-work != feature/issue-6-run-start-phase)",
+                output.getvalue(),
+            )
+            repaired_state = store.load_state()
+            self.assertEqual(repaired_state.phase, "idle")
+            self.assertFalse(repaired_state.retryable_local_only)
+            self.assertEqual(repaired_state.last_result, "aborted")
+            self.assertEqual(
+                repaired_state.last_mission,
+                MissionSummary(
+                    issue_number=6,
+                    pr_number=None,
+                    branch="feature/issue-6-run-start-phase",
+                    phase="start",
+                    conclusion="aborted",
+                ),
+            )
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_select_ready_issue_prefers_high_priority_labels(self) -> None:
