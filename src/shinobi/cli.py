@@ -58,13 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser = subparsers.add_parser("review", help="Wait for PR CI and persist review state.")
     review_parser.add_argument(
         "--timeout-seconds",
-        type=float,
+        type=non_negative_seconds,
         default=900,
         help="Maximum time to wait for CI completion.",
     )
     review_parser.add_argument(
         "--poll-interval-seconds",
-        type=float,
+        type=positive_seconds,
         default=10,
         help="Polling interval for CI status checks.",
     )
@@ -76,6 +76,20 @@ def positive_issue_number(value: str) -> int:
     if issue_number <= 0:
         raise argparse.ArgumentTypeError("issue number must be a positive integer")
     return issue_number
+
+
+def non_negative_seconds(value: str) -> float:
+    seconds = float(value)
+    if seconds < 0:
+        raise argparse.ArgumentTypeError("seconds must be non-negative")
+    return seconds
+
+
+def positive_seconds(value: str) -> float:
+    seconds = float(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("seconds must be positive")
+    return seconds
 
 
 def command_init(root: Path) -> int:
@@ -345,6 +359,13 @@ def command_review(
     timeout_seconds: float,
     poll_interval_seconds: float,
 ) -> int:
+    if timeout_seconds < 0:
+        print("review aborted: timeout_seconds must be non-negative")
+        return 1
+    if poll_interval_seconds <= 0:
+        print("review aborted: poll_interval_seconds must be positive")
+        return 1
+
     store = StateStore(root)
     if not store.has_state():
         print("Shinobi is not initialized in this workspace.")

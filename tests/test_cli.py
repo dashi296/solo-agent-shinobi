@@ -1022,6 +1022,47 @@ class CliTest(unittest.TestCase):
             client.assert_not_called()
             self.assertIsNone(store.load_lock())
 
+    def test_review_rejects_invalid_poll_interval_before_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    original_state = State(
+                        issue_number=33,
+                        pr_number=44,
+                        branch="feature/issue-33-review-ci",
+                        agent_identity=config.agent_identity,
+                        run_id="publish-run",
+                        phase="publish",
+                        last_result="published",
+                    )
+                    store.save_state(original_state)
+
+                    output = io.StringIO()
+                    client = Mock()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with redirect_stdout(output):
+                            exit_code = cli.command_review(
+                                root,
+                                timeout_seconds=30,
+                                poll_interval_seconds=0,
+                            )
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: poll_interval_seconds must be positive",
+                output.getvalue(),
+            )
+            self.assertEqual(store.load_state(), original_state)
+            client.assert_not_called()
+            self.assertIsNone(store.load_lock())
+
     def test_init_preserves_state_agent_identity_when_config_is_recreated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
