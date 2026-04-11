@@ -20,7 +20,9 @@ from .issue_selector import (
 )
 from .mission_publish import (
     MissionPublishError,
+    PublishedMission,
     blocking_verification_results,
+    handoff_published_mission,
     publish_mission,
 )
 from .mission_start import (
@@ -436,14 +438,6 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 run_id=run_id,
                 started_mission=started_mission,
             )
-            handoff_pre_publish_stop(
-                root=root,
-                store=store,
-                config=config,
-                run_id=run_id,
-                started_mission=started_mission,
-                stop_decision=stop_decision,
-            )
             published_mission = publish_mission(
                 root=root,
                 store=store,
@@ -451,6 +445,14 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 run_id=run_id,
                 state=store.load_state(),
                 execution_result=execution_result,
+            )
+            handoff_pre_publish_stop(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                published_mission=published_mission,
+                stop_decision=stop_decision,
             )
         except (MissionStartError, MissionPublishError, RuntimeError, ValueError) as error:
             print(f"run aborted: {error}")
@@ -559,7 +561,7 @@ def handoff_pre_publish_stop(
     store: StateStore,
     config: Config,
     run_id: str,
-    started_mission: StartedMission,
+    published_mission: PublishedMission,
     stop_decision: StopDecision | None,
 ) -> None:
     if stop_decision is None:
@@ -571,22 +573,22 @@ def handoff_pre_publish_stop(
             f"{stop_decision.conclusion}; handing off to needs-human instead. "
             f"Original reason: {stop_decision.reason}"
         )
-        handoff_started_mission(
+        handoff_published_mission(
             root=root,
             store=store,
             config=config,
             run_id=run_id,
-            started_mission=started_mission,
+            published_mission=published_mission,
             reason=reason,
         )
         raise MissionPublishError(reason)
 
-    handoff_started_mission(
+    handoff_published_mission(
         root=root,
         store=store,
         config=config,
         run_id=run_id,
-        started_mission=started_mission,
+        published_mission=published_mission,
         reason=stop_decision.reason,
     )
     raise MissionPublishError(stop_decision.reason)

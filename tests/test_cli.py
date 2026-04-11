@@ -860,6 +860,13 @@ class CliTest(unittest.TestCase):
                         issue_number=6,
                         lease_expires_at="2026-04-09T00:30:00Z",
                     )
+                    published_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        pr_number=31,
+                        pr_url="https://github.com/owner/repo/pull/31",
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
                     execution_result = ExecutionResult(
                         commands=[
                             VerificationCommandResult(
@@ -919,6 +926,13 @@ class CliTest(unittest.TestCase):
                         issue_number=6,
                         lease_expires_at="2026-04-09T00:30:00Z",
                     )
+                    published_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        pr_number=31,
+                        pr_url="https://github.com/owner/repo/pull/31",
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
                     execution_result = ExecutionResult(
                         commands=[
                             VerificationCommandResult(
@@ -958,10 +972,11 @@ class CliTest(unittest.TestCase):
                                             return_value=stop_decision,
                                         ):
                                             with patch(
-                                                "shinobi.cli.handoff_started_mission"
+                                                "shinobi.cli.handoff_published_mission"
                                             ) as handoff_mock:
                                                 with patch(
                                                     "shinobi.cli.publish_mission",
+                                                    return_value=published_mission,
                                                 ) as publish_mock:
                                                     with redirect_stdout(output):
                                                         exit_code = cli.main(["run"])
@@ -977,7 +992,7 @@ class CliTest(unittest.TestCase):
                 handoff_mock.call_args.kwargs["reason"],
                 stop_decision.reason,
             )
-            publish_mock.assert_not_called()
+            publish_mock.assert_called_once()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_hands_off_when_pre_publish_stop_requests_unsupported_conclusion(self) -> None:
@@ -993,6 +1008,13 @@ class CliTest(unittest.TestCase):
                     started_mission = Mock(
                         branch="feature/issue-6-run-start-phase",
                         issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    published_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        pr_number=31,
+                        pr_url="https://github.com/owner/repo/pull/31",
                         lease_expires_at="2026-04-09T00:30:00Z",
                     )
                     execution_result = ExecutionResult(
@@ -1031,10 +1053,11 @@ class CliTest(unittest.TestCase):
                                             return_value=stop_decision,
                                         ):
                                             with patch(
-                                                "shinobi.cli.handoff_started_mission"
+                                                "shinobi.cli.handoff_published_mission"
                                             ) as handoff_mock:
                                                 with patch(
                                                     "shinobi.cli.publish_mission",
+                                                    return_value=published_mission,
                                                 ) as publish_mock:
                                                     with redirect_stdout(output):
                                                         exit_code = cli.main(["run"])
@@ -1053,7 +1076,7 @@ class CliTest(unittest.TestCase):
                 "handing off to needs-human instead. Original reason: "
                 "Shinobi stopped before publish because auth changes require block.",
             )
-            publish_mock.assert_not_called()
+            publish_mock.assert_called_once()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_hands_off_when_high_risk_detection_fails_before_publish(self) -> None:
