@@ -53,6 +53,146 @@ from shinobi.reviewer import ReviewerError, collect_diff_stats, evaluate_review,
 from shinobi.state_store import StateStore
 
 
+class FakeGitHubClient:
+    def __init__(
+        self,
+        *,
+        issue_number: int,
+        title: str,
+        labels: list[str],
+        state: str = "OPEN",
+    ) -> None:
+        self.issue_number = issue_number
+        self.issue_title = title
+        self.issue_state = state
+        self.issue_labels = set(labels)
+        self.comments: list[dict[str, object]] = []
+        self.comment_id = 100
+        self.pull_requests: list[dict[str, object]] = []
+        self.next_pr_number = 40
+        self.closed_issues: list[int] = []
+        self.label_operations: list[tuple[str, int, tuple[str, ...]]] = []
+        self.raise_on_list_pull_requests: Exception | None = None
+
+    def get_issue(self, issue_number: int) -> dict[str, object]:
+        self._require_issue(issue_number)
+        return {
+            "number": self.issue_number,
+            "title": self.issue_title,
+            "state": self.issue_state,
+            "labels": [{"name": label} for label in sorted(self.issue_labels)],
+        }
+
+    def update_issue_labels(
+        self,
+        issue_number: int,
+        *,
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+    ) -> None:
+        self._require_issue(issue_number)
+        if add:
+            self.issue_labels.update(add)
+            self.label_operations.append(("add", issue_number, tuple(add)))
+        if remove:
+            self.issue_labels.difference_update(remove)
+            self.label_operations.append(("remove", issue_number, tuple(remove)))
+
+    def create_issue_comment(self, issue_number: int, body: str) -> None:
+        self._require_issue(issue_number)
+        self.comment_id += 1
+        self.comments.append({"id": self.comment_id, "body": body})
+
+    def list_issue_comments(
+        self,
+        issue_number: int,
+        *,
+        per_page: int = 100,
+    ) -> list[dict[str, object]]:
+        self._require_issue(issue_number)
+        return list(self.comments[:per_page])
+
+    def update_issue_comment(self, comment_id: int, body: str) -> None:
+        for comment in self.comments:
+            if comment["id"] == comment_id:
+                comment["body"] = body
+                return
+        raise GitHubClientError(f"comment {comment_id} not found")
+
+    def list_pull_requests_by_head(self, head: str) -> list[dict[str, object]]:
+        if self.raise_on_list_pull_requests is not None:
+            raise self.raise_on_list_pull_requests
+        return [pr for pr in self.pull_requests if pr["headRefName"] == head]
+
+    def create_pull_request(
+        self,
+        *,
+        title: str,
+        body: str,
+        base: str,
+        head: str,
+        draft: bool = False,
+    ) -> dict[str, object]:
+        pr = {
+            "number": self.next_pr_number,
+            "url": f"https://github.com/owner/repo/pull/{self.next_pr_number}",
+            "isDraft": draft,
+            "headRefName": head,
+            "baseRefName": base,
+            "title": title,
+            "body": body,
+        }
+        self.next_pr_number += 1
+        self.pull_requests.append(pr)
+        return dict(pr)
+
+    def update_pull_request(
+        self,
+        pr_number: int,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        base: str | None = None,
+    ) -> dict[str, object]:
+        pr = self._require_pull_request(pr_number)
+        if title is not None:
+            pr["title"] = title
+        if body is not None:
+            pr["body"] = body
+        if base is not None:
+            pr["baseRefName"] = base
+        return dict(pr)
+
+    def convert_pull_request_to_draft(self, pr_number: int) -> dict[str, object]:
+        pr = self._require_pull_request(pr_number)
+        pr["isDraft"] = True
+        return dict(pr)
+
+    def convert_pull_request_to_ready(self, pr_number: int) -> dict[str, object]:
+        pr = self._require_pull_request(pr_number)
+        pr["isDraft"] = False
+        return dict(pr)
+
+    def get_pull_request(self, identifier: str) -> dict[str, object]:
+        pr_number = int(identifier)
+        return dict(self._require_pull_request(pr_number))
+
+    def close_issue(self, issue_number: int) -> None:
+        self._require_issue(issue_number)
+        self.issue_state = "CLOSED"
+        self.closed_issues.append(issue_number)
+
+    def _require_issue(self, issue_number: int) -> None:
+        if issue_number != self.issue_number:
+            raise GitHubClientError(f"issue #{issue_number} not found")
+
+    def _require_pull_request(self, pr_number: int) -> dict[str, object]:
+        for pr in self.pull_requests:
+            if int(pr["number"]) == pr_number:
+                return pr
+        raise GitHubClientError(f"PR #{pr_number} not found")
+
+
 class CliTest(unittest.TestCase):
     def test_init_creates_workspace_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3468,6 +3608,200 @@ class MissionFinalizeTest(unittest.TestCase):
             saved_state = store.load_state()
             self.assertEqual(saved_state.last_result, "needs-human")
             self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+
+
+class MissionLifecycleIntegrationTest(unittest.TestCase):
+    def test_lifecycle_happy_path_transitions_start_publish_and_finalize(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                config, _ = store.initialize()
+
+            run_id = "run-123"
+            now = datetime(2026, 4, 11, 0, 0, tzinfo=timezone.utc)
+            store.save_lock(store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)[0])
+
+            issue = {
+                "number": 40,
+                "title": "[TASK] mission lifecycle の結合テストを追加する",
+                "state": "OPEN",
+                "labels": [
+                    {"name": "priority:low"},
+                    {"name": config.labels["ready"]},
+                ],
+            }
+            fake_client = FakeGitHubClient(
+                issue_number=40,
+                title=str(issue["title"]),
+                labels=["priority:low", config.labels["ready"]],
+            )
+            execution_result = ExecutionResult(
+                commands=[
+                    VerificationCommandResult(
+                        name="lint",
+                        command=["ruff", "check", "."],
+                        status="passed",
+                        returncode=0,
+                    )
+                ],
+                change_summary="Add lifecycle integration tests.",
+            )
+            git_success = subprocess.CompletedProcess(
+                args=["git"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+            with patch("shinobi.mission_start.GitHubClient", return_value=fake_client):
+                with patch("shinobi.mission_publish.GitHubClient", return_value=fake_client):
+                    with patch("shinobi.mission_finalize.GitHubClient", return_value=fake_client):
+                        with patch("shinobi.mission_start.subprocess.run", return_value=git_success):
+                            with patch(
+                                "shinobi.mission_publish.subprocess.run",
+                                return_value=git_success,
+                            ):
+                                started = start_mission(
+                                    root=root,
+                                    store=store,
+                                    config=config,
+                                    run_id=run_id,
+                                    issue=issue,
+                                    now=now,
+                                )
+                                started_comment = fake_client.comments[0]["body"]
+                                published = publish_mission(
+                                    root=root,
+                                    store=store,
+                                    config=config,
+                                    run_id=run_id,
+                                    state=store.load_state(),
+                                    execution_result=execution_result,
+                                    now=now,
+                                )
+                                finalized = finalize_mission(
+                                    root=root,
+                                    store=store,
+                                    config=config,
+                                    run_id=run_id,
+                                    state=store.load_state(),
+                                    conclusion="merged",
+                                )
+
+            self.assertEqual(started.issue_number, 40)
+            self.assertEqual(published.pr_number, 40)
+            self.assertEqual(finalized.conclusion, "merged")
+            self.assertEqual(fake_client.issue_state, "CLOSED")
+            self.assertEqual(fake_client.closed_issues, [40])
+            self.assertEqual(fake_client.issue_labels, {"priority:low", config.labels["merged"]})
+            self.assertEqual(
+                fake_client.label_operations,
+                [
+                    ("add", 40, (config.labels["working"],)),
+                    ("remove", 40, (config.labels["ready"],)),
+                    ("add", 40, (config.labels["reviewing"],)),
+                    ("remove", 40, (config.labels["working"],)),
+                    ("add", 40, (config.labels["merged"],)),
+                    ("remove", 40, (config.labels["reviewing"],)),
+                ],
+            )
+            self.assertEqual(len(fake_client.comments), 2)
+            self.assertIn("Shinobi Publish", str(fake_client.comments[0]["body"]))
+            self.assertIn("Shinobi Finalize: merged", str(fake_client.comments[1]["body"]))
+            self.assertIn("Shinobi Start", str(started_comment))
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "merged")
+            self.assertEqual(saved_state.last_mission.issue_number, 40)
+            self.assertEqual(saved_state.last_mission.pr_number, 40)
+            self.assertEqual(saved_state.last_mission.phase, "finalize")
+            self.assertEqual(saved_state.last_mission.conclusion, "merged")
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_lifecycle_publish_failure_hands_off_to_needs_human(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                config, _ = store.initialize()
+
+            run_id = "run-123"
+            now = datetime(2026, 4, 11, 0, 0, tzinfo=timezone.utc)
+            store.save_lock(store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)[0])
+
+            issue = {
+                "number": 40,
+                "title": "[TASK] mission lifecycle の結合テストを追加する",
+                "state": "OPEN",
+                "labels": [{"name": config.labels["ready"]}],
+            }
+            fake_client = FakeGitHubClient(
+                issue_number=40,
+                title=str(issue["title"]),
+                labels=[config.labels["ready"]],
+            )
+            fake_client.raise_on_list_pull_requests = GitHubClientError("lookup failed")
+            execution_result = ExecutionResult(
+                commands=[
+                    VerificationCommandResult(
+                        name="test",
+                        command=["python3", "-m", "unittest"],
+                        status="passed",
+                        returncode=0,
+                    )
+                ],
+                change_summary="Add lifecycle integration tests.",
+            )
+            git_success = subprocess.CompletedProcess(
+                args=["git"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+            with patch("shinobi.mission_start.GitHubClient", return_value=fake_client):
+                with patch("shinobi.mission_publish.GitHubClient", return_value=fake_client):
+                    with patch("shinobi.mission_start.subprocess.run", return_value=git_success):
+                        with patch(
+                            "shinobi.mission_publish.subprocess.run",
+                            return_value=git_success,
+                        ):
+                            start_mission(
+                                root=root,
+                                store=store,
+                                config=config,
+                                run_id=run_id,
+                                issue=issue,
+                                now=now,
+                            )
+                            with self.assertRaisesRegex(
+                                MissionPublishError,
+                                "failed to look up existing PR for issue #40: lookup failed",
+                            ):
+                                publish_mission(
+                                    root=root,
+                                    store=store,
+                                    config=config,
+                                    run_id=run_id,
+                                    state=store.load_state(),
+                                    execution_result=execution_result,
+                                    now=now,
+                                )
+
+            self.assertEqual(fake_client.issue_state, "OPEN")
+            self.assertEqual(fake_client.issue_labels, {config.labels["needs_human"]})
+            self.assertEqual(len(fake_client.comments), 2)
+            self.assertIn("Shinobi Start", str(fake_client.comments[0]["body"]))
+            self.assertIn("failed to look up existing PR", str(fake_client.comments[1]["body"]))
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertIn("lookup failed", str(saved_state.last_error))
+            self.assertEqual(saved_state.last_mission.issue_number, 40)
+            self.assertEqual(saved_state.last_mission.phase, "publish")
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+            self.assertIn(run_id, store.paths.lock_path.read_text(encoding="utf-8"))
 
 
 class ContextBuilderTest(unittest.TestCase):
