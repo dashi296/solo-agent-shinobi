@@ -4,7 +4,7 @@ import argparse
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -33,6 +33,7 @@ from .mission_start import (
     start_mission,
 )
 from .models import Config, ExecutionResult, State, StopDecision
+from .reviewer import ReviewerError, wait_for_ci
 from .state_store import StateStore
 
 
@@ -53,6 +54,19 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status", help="Show local Shinobi state.")
     run_parser = subparsers.add_parser("run", help="Start a mission lifecycle.")
     run_parser.add_argument("--issue", type=positive_issue_number, help="Issue number to run.")
+    review_parser = subparsers.add_parser("review", help="Wait for PR CI and persist review state.")
+    review_parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=900,
+        help="Maximum time to wait for CI completion.",
+    )
+    review_parser.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        default=10,
+        help="Polling interval for CI status checks.",
+    )
     return parser
 
 
@@ -319,9 +333,165 @@ def expected_status_label(mission_ref: StatusMissionRef, config: Config) -> str 
         return None
     if mission_ref.phase == "start":
         return config.labels["working"]
-    if mission_ref.phase == "publish":
+    if mission_ref.phase in {"publish", "review"}:
         return config.labels["reviewing"]
     return None
+
+
+def command_review(
+    root: Path,
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> int:
+    store = StateStore(root)
+    if not store.has_state():
+        print("Shinobi is not initialized in this workspace.")
+        print("Run `shinobi init` first.")
+        return 1
+
+    config, config_error = store.try_load_config()
+    if config is None:
+        print(f"failed to load config: {config_error}")
+        return 1
+
+    state, state_error = store.try_load_state()
+    if state is None:
+        print(f"failed to load local state: {state_error}")
+        return 1
+
+    if state.phase not in {"publish", "review"}:
+        print(
+            "review aborted: local mission state must be in publish or review phase, "
+            f"got {state.phase}"
+        )
+        return 1
+    if state.issue_number is None or state.pr_number is None or not state.branch:
+        print("review aborted: local mission state requires issue_number, pr_number, and branch")
+        return 1
+
+    run_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    try:
+        store.acquire_lock(
+            config=config,
+            run_id=run_id,
+            pid=os.getpid(),
+            now=now,
+        )
+    except (RuntimeError, ValueError) as error:
+        print(f"review aborted: {error}")
+        return 1
+
+    try:
+        try:
+            store.save_state(
+                State(
+                    issue_number=state.issue_number,
+                    pr_number=state.pr_number,
+                    branch=state.branch,
+                    agent_identity=config.agent_identity,
+                    run_id=run_id,
+                    phase="review",
+                    review_loop_count=state.review_loop_count,
+                    retryable_local_only=False,
+                    lease_expires_at=store.format_timestamp(
+                        now + timedelta(minutes=config.mission_lease_minutes)
+                    ),
+                    last_result=state.last_result,
+                    last_error=None,
+                    last_mission=state.last_mission,
+                    extra=state.extra,
+                )
+            )
+        except OSError as error:
+            print(f"review aborted: failed to persist review state: {error}")
+            return 1
+
+        client = GitHubClient(root, repo=config.repo)
+
+        def heartbeat() -> None:
+            heartbeat_now = datetime.now(timezone.utc)
+            store.refresh_lock_heartbeat(
+                run_id=run_id,
+                agent_identity=config.agent_identity,
+                now=heartbeat_now,
+            )
+
+        try:
+            ci_status = wait_for_ci(
+                client,
+                state.pr_number,
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+                heartbeat=heartbeat,
+            )
+        except (ReviewerError, RuntimeError, ValueError) as error:
+            print(f"review aborted: {error}")
+            return 1
+
+        review_state = State(
+            issue_number=state.issue_number,
+            pr_number=state.pr_number,
+            branch=state.branch,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
+            phase="review",
+            review_loop_count=state.review_loop_count,
+            retryable_local_only=False,
+            lease_expires_at=store.format_timestamp(
+                datetime.now(timezone.utc) + timedelta(minutes=config.mission_lease_minutes)
+            ),
+            last_result=render_review_result(ci_status),
+            last_error="CI polling timed out before checks completed" if ci_status.timed_out else None,
+            last_mission=state.last_mission,
+            extra={
+                **state.extra,
+                "ci_status": {
+                    "status": ci_status.status,
+                    "timed_out": ci_status.timed_out,
+                    "checks": [
+                        {
+                            "name": check.name,
+                            "state": check.state,
+                            "bucket": check.bucket,
+                            "link": check.link,
+                        }
+                        for check in ci_status.checks
+                    ],
+                },
+            },
+        )
+        try:
+            store.save_state(review_state)
+        except OSError as error:
+            print(f"review aborted: failed to persist CI review result: {error}")
+            return 1
+
+        print(f"review_issue: #{state.issue_number}")
+        print(f"review_pr: #{state.pr_number}")
+        print(f"ci_status: {ci_status.status}")
+        print(f"ci_timed_out: {ci_status.timed_out}")
+        if ci_status.checks:
+            print(
+                "ci_checks: "
+                + ", ".join(f"{check.name}={check.bucket}" for check in ci_status.checks)
+            )
+        else:
+            print("ci_checks: none")
+        return 1 if ci_status.timed_out else 0
+    finally:
+        store.clear_lock(run_id)
+
+
+def render_review_result(ci_status: Any) -> str:
+    if ci_status.timed_out:
+        return "ci-timeout"
+    if ci_status.is_failed:
+        return "ci-failure"
+    if ci_status.is_successful:
+        return "ci-success"
+    return "ci-pending"
 
 
 def command_run(root: Path, issue_number: Optional[int]) -> int:
@@ -636,6 +806,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return command_init(root)
     if args.command == "status":
         return command_status(root)
+    if args.command == "review":
+        return command_review(
+            root,
+            timeout_seconds=args.timeout_seconds,
+            poll_interval_seconds=args.poll_interval_seconds,
+        )
     if args.command == "run":
         return command_run(root, args.issue)
 

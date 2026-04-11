@@ -527,6 +527,132 @@ class CliTest(unittest.TestCase):
             self.assertFalse(store.paths.decisions_path.exists())
             self.assertFalse(store.paths.lock_path.exists())
 
+    def test_review_waits_for_ci_and_persists_review_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    client = Mock()
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            return_value=CIStatus(
+                                checks=[
+                                    PullRequestCheck(
+                                        name="test",
+                                        state="SUCCESS",
+                                        bucket="pass",
+                                    )
+                                ],
+                                status="success",
+                            ),
+                        ) as wait_for_ci_mock:
+                            with redirect_stdout(output):
+                                exit_code = cli.main(
+                                    [
+                                        "review",
+                                        "--timeout-seconds",
+                                        "30",
+                                        "--poll-interval-seconds",
+                                        "5",
+                                    ]
+                                )
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("review_issue: #33", rendered)
+            self.assertIn("review_pr: #44", rendered)
+            self.assertIn("ci_status: success", rendered)
+            self.assertIn("ci_checks: test=pass", rendered)
+            wait_for_ci_mock.assert_called_once()
+            self.assertIs(wait_for_ci_mock.call_args.args[0], client)
+            self.assertEqual(wait_for_ci_mock.call_args.args[1], 44)
+            self.assertEqual(wait_for_ci_mock.call_args.kwargs["timeout_seconds"], 30.0)
+            self.assertEqual(wait_for_ci_mock.call_args.kwargs["poll_interval_seconds"], 5.0)
+            self.assertIsNotNone(wait_for_ci_mock.call_args.kwargs["heartbeat"])
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.last_result, "ci-success")
+            self.assertIsNone(saved_state.last_error)
+            self.assertEqual(saved_state.extra["ci_status"]["status"], "success")
+            self.assertFalse(saved_state.extra["ci_status"]["timed_out"])
+            self.assertEqual(saved_state.extra["ci_status"]["checks"][0]["name"], "test")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_timeout_returns_nonzero_and_persists_pending_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=Mock()):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            return_value=CIStatus(
+                                checks=[
+                                    PullRequestCheck(
+                                        name="test",
+                                        state="QUEUED",
+                                        bucket="pending",
+                                    )
+                                ],
+                                status="pending",
+                                timed_out=True,
+                            ),
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("ci_status: pending", rendered)
+            self.assertIn("ci_timed_out: True", rendered)
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.last_result, "ci-timeout")
+            self.assertEqual(saved_state.last_error, "CI polling timed out before checks completed")
+            self.assertTrue(saved_state.extra["ci_status"]["timed_out"])
+            self.assertIsNone(store.load_lock())
+
     def test_init_preserves_state_agent_identity_when_config_is_recreated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
