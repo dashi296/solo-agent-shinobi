@@ -313,7 +313,7 @@ def create_or_update_pull_request(
 
     existing_pr = existing_prs[0]
     try:
-        return client.update_pull_request(
+        updated_pr = client.update_pull_request(
             int(existing_pr["number"]),
             title=title,
             body=body,
@@ -323,6 +323,17 @@ def create_or_update_pull_request(
         raise MissionPublishError(
             f"failed to update PR #{existing_pr.get('number')} for issue #{issue_number}: {error}"
         ) from error
+
+    if config.use_draft_pr and not bool(updated_pr.get("isDraft")):
+        pr_number = int(updated_pr["number"])
+        try:
+            return client.convert_pull_request_to_draft(pr_number)
+        except GitHubClientError as error:
+            raise MissionPublishError(
+                f"failed to convert PR #{pr_number} to draft for issue #{issue_number}: {error}"
+            ) from error
+
+    return updated_pr
 
 
 def render_pr_body(*, issue_number: int, execution_result: ExecutionResult) -> str:

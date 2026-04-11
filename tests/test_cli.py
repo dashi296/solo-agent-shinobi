@@ -1940,11 +1940,13 @@ class MissionPublishTest(unittest.TestCase):
                         {
                             "number": 44,
                             "url": "https://github.com/owner/repo/pull/44",
+                            "isDraft": True,
                         }
                     ]
                     client.update_pull_request.return_value = {
                         "number": 44,
                         "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": True,
                     }
                     client.get_issue.side_effect = [
                         {
@@ -1970,6 +1972,85 @@ class MissionPublishTest(unittest.TestCase):
 
             client.create_pull_request.assert_not_called()
             client.update_pull_request.assert_called_once()
+            client.convert_pull_request_to_draft.assert_not_called()
+            client.create_issue_comment.assert_called_once()
+
+    def test_publish_mission_converts_existing_pr_back_to_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps({"repo": "owner/repo", "agent_identity": "agent-1"}),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "agent-1", "phase": "idle"}),
+                encoding="utf-8",
+            )
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id="run-123", pid=123, now=now)
+            state = cli.State(
+                issue_number=31,
+                branch="feature/issue-31-publish-phase",
+                agent_identity="agent-1",
+                run_id="run-123",
+                phase="start",
+            )
+            execution_result = Mock()
+            execution_result.change_summary = "Published mission changes."
+            execution_result.commands = []
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.list_pull_requests_by_head.return_value = [
+                        {
+                            "number": 44,
+                            "url": "https://github.com/owner/repo/pull/44",
+                            "isDraft": False,
+                        }
+                    ]
+                    client.update_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": False,
+                    }
+                    client.convert_pull_request_to_draft.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": True,
+                    }
+                    client.get_issue.side_effect = [
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:working"}],
+                        },
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:reviewing"}],
+                        },
+                    ]
+                    client.list_issue_comments.return_value = []
+
+                    publish_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                        now=now,
+                    )
+
+            client.create_pull_request.assert_not_called()
+            client.update_pull_request.assert_called_once()
+            client.convert_pull_request_to_draft.assert_called_once_with(44)
             client.create_issue_comment.assert_called_once()
 
     def test_publish_mission_hands_off_when_publish_label_cleanup_fails(self) -> None:
@@ -3157,6 +3238,41 @@ class GitHubClientTest(unittest.TestCase):
                     "failed to parse PR list for head feature/issue-25",
                 ):
                     client.list_pull_requests_by_head("feature/issue-25")
+
+    def test_convert_pull_request_to_draft_fetches_updated_pr_metadata(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["gh", "pr", "ready", "42", "--undo"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["gh", "pr", "view", "42"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "number": 42,
+                        "url": "https://github.com/owner/repo/pull/42",
+                        "isDraft": True,
+                        "headRefName": "feature/issue-25",
+                        "baseRefName": "main",
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                pr = client.convert_pull_request_to_draft(42)
+
+        self.assertEqual(pr["number"], 42)
+        self.assertEqual(run_mock.call_count, 2)
+        ready_command = run_mock.call_args_list[0].args[0]
+        self.assertEqual(ready_command[:4], ["gh", "pr", "ready", "42"])
+        self.assertIn("--undo", ready_command)
 
     def test_init_keeps_shinobi_directory_ignored_by_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
