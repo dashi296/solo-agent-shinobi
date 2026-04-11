@@ -653,6 +653,60 @@ class CliTest(unittest.TestCase):
             self.assertTrue(saved_state.extra["ci_status"]["timed_out"])
             self.assertIsNone(store.load_lock())
 
+    def test_review_failed_ci_returns_nonzero_and_persists_failure_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=Mock()):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            return_value=CIStatus(
+                                checks=[
+                                    PullRequestCheck(
+                                        name="test",
+                                        state="FAILURE",
+                                        bucket="fail",
+                                    )
+                                ],
+                                status="failure",
+                            ),
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("ci_status: failure", rendered)
+            self.assertIn("ci_timed_out: False", rendered)
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.last_result, "ci-failure")
+            self.assertIsNone(saved_state.last_error)
+            self.assertEqual(saved_state.extra["ci_status"]["status"], "failure")
+            self.assertFalse(saved_state.extra["ci_status"]["timed_out"])
+            self.assertIsNone(store.load_lock())
+
     def test_init_preserves_state_agent_identity_when_config_is_recreated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

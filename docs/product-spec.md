@@ -199,6 +199,7 @@ shinobi init
 shinobi status
 shinobi run
 shinobi run --issue 123
+shinobi review
 ```
 
 将来コマンド候補:
@@ -206,7 +207,6 @@ shinobi run --issue 123
 ```bash
 shinobi plan --issue 123
 shinobi execute --issue 123
-shinobi review --issue 123
 shinobi merge --issue 123
 shinobi watch
 ```

@@ -479,7 +479,7 @@ def command_review(
             )
         else:
             print("ci_checks: none")
-        return 1 if ci_status.timed_out else 0
+        return 1 if ci_status.timed_out or ci_status.is_failed else 0
     finally:
         store.clear_lock(run_id)
 
