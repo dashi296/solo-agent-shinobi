@@ -241,10 +241,15 @@ class GitHubClient:
             )
         return payload
 
-    def rerun_workflow_run(self, run_id: str) -> None:
+    def rerun_workflow_run(self, run_id: str, *, failed_only: bool = True) -> None:
+        args = ["run", "rerun", run_id]
+        if failed_only:
+            args.append("--failed")
+        args.extend(["--repo", self.repo])
+        rerun_target = "failed jobs for" if failed_only else "entire"
         self._run_gh(
-            ["run", "rerun", run_id, "--failed", "--repo", self.repo],
-            action=f"rerun failed jobs for workflow run {run_id}",
+            args,
+            action=f"rerun {rerun_target} workflow run {run_id}",
         )
 
     def merge_pull_request(

@@ -50,6 +50,12 @@ class StatusMissionRef:
     conclusion: str | None = None
 
 
+@dataclass(frozen=True)
+class ActionsRunRetry:
+    run_id: str
+    failed_only: bool
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="shinobi")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -684,8 +690,8 @@ def handle_failed_ci_review(
         print(reason)
         return 1
 
-    retry_run_ids = failed_actions_run_ids(ci_status, repo=config.repo)
-    if not retry_run_ids:
+    retry_runs = actions_run_retries(ci_status, repo=config.repo)
+    if not retry_runs:
         stop_lease_expires_at = store.format_timestamp(
             datetime.now(timezone.utc) + timedelta(minutes=config.mission_lease_minutes)
         )
@@ -720,9 +726,10 @@ def handle_failed_ci_review(
         print(reason)
         return 1
 
-    for retry_run_id in retry_run_ids:
-        client.rerun_workflow_run(retry_run_id)
+    for retry_run in retry_runs:
+        client.rerun_workflow_run(retry_run.run_id, failed_only=retry_run.failed_only)
 
+    retry_run_ids = [retry_run.run_id for retry_run in retry_runs]
     retry_count = state.review_loop_count + 1
     retry_reason = (
         "CI failed; local verification passed and failed GitHub Actions workflow "
@@ -764,17 +771,22 @@ def handle_failed_ci_review(
 
 
 def failed_actions_run_ids(ci_status: Any, *, repo: str) -> list[str]:
-    run_ids: list[str] = []
-    seen: set[str] = set()
+    return [retry.run_id for retry in actions_run_retries(ci_status, repo=repo)]
+
+
+def actions_run_retries(ci_status: Any, *, repo: str) -> list[ActionsRunRetry]:
+    retries: dict[str, ActionsRunRetry] = {}
     for check in ci_status.checks:
         if check.bucket not in {"fail", "cancel"} or not check.link:
             continue
         run_id = parse_actions_run_id(check.link, repo=repo)
-        if run_id is None or run_id in seen:
+        if run_id is None:
             continue
-        seen.add(run_id)
-        run_ids.append(run_id)
-    return run_ids
+        failed_only = check.bucket != "cancel"
+        if run_id in retries:
+            failed_only = retries[run_id].failed_only and failed_only
+        retries[run_id] = ActionsRunRetry(run_id=run_id, failed_only=failed_only)
+    return list(retries.values())
 
 
 def parse_actions_run_id(link: str, *, repo: str) -> str | None:

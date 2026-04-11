@@ -829,7 +829,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("review_result: retry", rendered)
             self.assertIn("next_phase: review", rendered)
             execute_verification_mock.assert_called_once()
-            client.rerun_workflow_run.assert_called_once_with("123456789")
+            client.rerun_workflow_run.assert_called_once_with("123456789", failed_only=True)
 
             saved_state = store.load_state()
             self.assertEqual(saved_state.phase, "review")
@@ -982,6 +982,41 @@ class CliTest(unittest.TestCase):
         self.assertEqual(
             cli.failed_actions_run_ids(status, repo="owner/repo"),
             ["123456789"],
+        )
+
+    def test_actions_run_retries_reruns_canceled_actions_runs_entirely(self) -> None:
+        status = CIStatus(
+            checks=[
+                PullRequestCheck(
+                    name="cancelled",
+                    state="CANCELLED",
+                    bucket="cancel",
+                    link="https://github.com/owner/repo/actions/runs/123456789",
+                ),
+                PullRequestCheck(
+                    name="failed",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/123456789",
+                ),
+                PullRequestCheck(
+                    name="other-failed",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/222",
+                ),
+            ],
+            status="failure",
+        )
+
+        retries = cli.actions_run_retries(status, repo="owner/repo")
+
+        self.assertEqual(
+            retries,
+            [
+                cli.ActionsRunRetry(run_id="123456789", failed_only=False),
+                cli.ActionsRunRetry(run_id="222", failed_only=True),
+            ],
         )
 
     def test_review_failed_ci_finalizes_needs_human_when_retry_verification_fails(self) -> None:
@@ -5967,6 +6002,24 @@ class GitHubClientTest(unittest.TestCase):
         self.assertEqual(
             run_mock.call_args.args[0],
             ["gh", "run", "rerun", "123456789", "--failed", "--repo", "owner/repo"],
+        )
+
+    def test_rerun_workflow_run_can_rerun_entire_run(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "run", "rerun", "123456789"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.rerun_workflow_run("123456789", failed_only=False)
+
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["gh", "run", "rerun", "123456789", "--repo", "owner/repo"],
         )
 
     def test_list_issue_comments_reads_comments_from_issue_view(self) -> None:
