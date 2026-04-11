@@ -22,6 +22,11 @@ from shinobi.config import discover_repo_slug
 from shinobi.context_builder import build_mission_context
 from shinobi.executor import execute_verification, run_verification_command
 from shinobi.github_client import GitHubClient, GitHubClientError
+from shinobi.mission_finalize import (
+    MissionFinalizeError,
+    finalize_mission,
+    render_finalize_comment,
+)
 from shinobi.mission_publish import (
     MissionPublishError,
     build_same_repo_head_selector,
@@ -3198,6 +3203,204 @@ class MissionPublishTest(unittest.TestCase):
         )
 
 
+class MissionFinalizeTest(unittest.TestCase):
+    def test_finalize_merged_normalizes_labels_closes_issue_and_clears_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            config = Config(repo="owner/repo", agent_identity="owner/repo#default@host-12345678")
+            store.initialize()
+            run_id = "run-123"
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            store.save_lock(
+                store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)[0]
+            )
+            state = State(
+                issue_number=32,
+                pr_number=45,
+                branch="feature/issue-32-finalize-phase",
+                agent_identity=config.agent_identity,
+                run_id=run_id,
+                phase="publish",
+                review_loop_count=1,
+                lease_expires_at="2026-04-11T01:00:00Z",
+                last_result="merged",
+            )
+
+            with patch("shinobi.mission_finalize.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 32,
+                    "labels": [
+                        {"name": "shinobi:reviewing"},
+                        {"name": "shinobi:risky"},
+                    ],
+                }
+
+                finalized = finalize_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    state=state,
+                    conclusion="merged",
+                )
+
+            self.assertEqual(finalized.issue_number, 32)
+            self.assertEqual(finalized.pr_number, 45)
+            self.assertEqual(finalized.conclusion, "merged")
+            self.assertEqual(
+                client.update_issue_labels.call_args_list,
+                [
+                    unittest.mock.call(32, add=["shinobi:merged"]),
+                    unittest.mock.call(32, remove=["shinobi:reviewing"]),
+                ],
+            )
+            client.create_issue_comment.assert_called_once()
+            client.close_issue.assert_called_once_with(32)
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "merged")
+            self.assertIsNone(saved_state.last_error)
+            self.assertEqual(saved_state.last_mission.issue_number, 32)
+            self.assertEqual(saved_state.last_mission.pr_number, 45)
+            self.assertEqual(saved_state.last_mission.branch, "feature/issue-32-finalize-phase")
+            self.assertEqual(saved_state.last_mission.phase, "finalize")
+            self.assertEqual(saved_state.last_mission.conclusion, "merged")
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_finalize_needs_human_uses_last_mission_without_closing_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            config = Config(repo="owner/repo", agent_identity="owner/repo#default@host-12345678")
+            store.initialize()
+            run_id = "run-123"
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            store.save_lock(
+                store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)[0]
+            )
+            state = State(
+                issue_number=None,
+                pr_number=None,
+                branch=None,
+                agent_identity=config.agent_identity,
+                run_id=None,
+                phase="idle",
+                last_result="needs-human",
+                last_error="verification failed",
+                last_mission=MissionSummary(
+                    issue_number=32,
+                    pr_number=45,
+                    branch="feature/issue-32-finalize-phase",
+                    phase="publish",
+                    conclusion="needs-human",
+                ),
+            )
+
+            with patch("shinobi.mission_finalize.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 32,
+                    "labels": [
+                        {"name": "shinobi:reviewing"},
+                        {"name": "shinobi:risky"},
+                    ],
+                }
+
+                finalized = finalize_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    state=state,
+                    conclusion="needs-human",
+                    reason="manual follow-up is required",
+                )
+
+            self.assertEqual(finalized.issue_number, 32)
+            self.assertEqual(finalized.pr_number, 45)
+            self.assertEqual(finalized.conclusion, "needs-human")
+            self.assertEqual(
+                client.update_issue_labels.call_args_list,
+                [
+                    unittest.mock.call(32, add=["shinobi:needs-human"]),
+                    unittest.mock.call(32, remove=["shinobi:reviewing"]),
+                ],
+            )
+            client.close_issue.assert_not_called()
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertEqual(saved_state.last_error, "manual follow-up is required")
+            self.assertEqual(saved_state.last_mission.phase, "finalize")
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_finalize_keeps_lock_when_comment_creation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            config = Config(repo="owner/repo", agent_identity="owner/repo#default@host-12345678")
+            store.initialize()
+            run_id = "run-123"
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            store.save_lock(
+                store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)[0]
+            )
+            state = State(
+                issue_number=32,
+                pr_number=45,
+                branch="feature/issue-32-finalize-phase",
+                agent_identity=config.agent_identity,
+                run_id=run_id,
+                phase="publish",
+            )
+
+            with patch("shinobi.mission_finalize.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 32,
+                    "labels": [{"name": "shinobi:reviewing"}],
+                }
+                client.create_issue_comment.side_effect = GitHubClientError("api unavailable")
+
+                with self.assertRaisesRegex(
+                    MissionFinalizeError,
+                    "failed to create finalize comment on issue #32",
+                ):
+                    finalize_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id=run_id,
+                        state=state,
+                        conclusion="blocked",
+                        reason="human approval required",
+                    )
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "initialized")
+            self.assertIn(run_id, store.paths.lock_path.read_text(encoding="utf-8"))
+
+    def test_render_finalize_comment_includes_reason_and_branch(self) -> None:
+        rendered = render_finalize_comment(
+            issue_number=32,
+            pr_number=45,
+            branch="feature/issue-32-finalize-phase",
+            conclusion="needs-human",
+            reason="manual follow-up is required",
+        )
+
+        self.assertIn("Shinobi Finalize: needs-human", rendered)
+        self.assertIn("任務 #32", rendered)
+        self.assertIn("`needs-human`", rendered)
+        self.assertIn("feature/issue-32-finalize-phase", rendered)
+        self.assertIn("PR", rendered.upper())
+        self.assertIn("manual follow-up is required", rendered)
+
+
 class ContextBuilderTest(unittest.TestCase):
     def test_build_mission_context_reads_issue_and_local_knowledge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3679,6 +3882,21 @@ class GitHubClientTest(unittest.TestCase):
         self.assertEqual(command[:4], ["gh", "issue", "comment", "6"])
         self.assertIn("--body", command)
         self.assertIn("mission started", command)
+
+    def test_close_issue_runs_gh_issue_close(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "issue", "close", "6"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.close_issue(6)
+
+        self.assertEqual(run_mock.call_args.args[0][:4], ["gh", "issue", "close", "6"])
 
     def test_list_issue_comments_reads_comments_from_issue_view(self) -> None:
         response = subprocess.CompletedProcess(
