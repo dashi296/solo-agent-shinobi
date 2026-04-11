@@ -4309,6 +4309,14 @@ class ExecutorTest(unittest.TestCase):
 
         self.assertEqual(matched, ["auth/", "billing/"])
 
+    def test_find_high_risk_paths_preserves_dot_prefixed_paths(self) -> None:
+        matched = find_high_risk_paths(
+            changed_paths=[".github/workflows/release.yml", "src/app.py"],
+            high_risk_paths=[".github/", "auth/"],
+        )
+
+        self.assertEqual(matched, [".github/"])
+
     def test_detect_high_risk_stop_returns_structured_decision(self) -> None:
         response = subprocess.CompletedProcess(
             args=["git", "diff"],

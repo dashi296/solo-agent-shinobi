@@ -87,7 +87,11 @@ def path_matches_high_risk(changed_path: str, high_risk_path: str) -> bool:
 
 
 def normalize_repo_path(path: str) -> str:
-    normalized = path.replace("\\", "/").lstrip("./")
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    while normalized.startswith("/"):
+        normalized = normalized[1:]
     return normalized if not path.endswith("/") else normalized.rstrip("/") + "/"
 
 
