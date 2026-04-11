@@ -431,7 +431,13 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 started_mission=started_mission,
                 execution_result=execution_result,
             )
-            stop_decision = detect_high_risk_stop(root, config)
+            stop_decision = detect_pre_publish_stop(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+            )
             published_mission = publish_mission(
                 root=root,
                 store=store,
@@ -525,6 +531,29 @@ def handoff_failed_verification(
         reason=reason,
     )
     raise MissionPublishError(reason)
+
+
+def detect_pre_publish_stop(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+) -> StopDecision | None:
+    try:
+        return detect_high_risk_stop(root, config)
+    except RuntimeError as error:
+        reason = f"Shinobi failed to evaluate pre-publish stop conditions: {error}"
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason) from error
 
 
 def handoff_pre_publish_stop(
