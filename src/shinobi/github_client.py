@@ -216,6 +216,7 @@ class GitHubClient:
                 "name,state,link,bucket",
             ],
             action=f"load CI status for PR #{pr_number}",
+            allowed_returncodes={0, 8},
         )
         if not isinstance(payload, list):
             raise GitHubClientError(
@@ -269,8 +270,14 @@ class GitHubClient:
         *,
         action: str,
         fields: dict[str, str] | None = None,
+        allowed_returncodes: set[int] | None = None,
     ) -> Any:
-        result = self._run_gh(args, action=action, fields=fields)
+        result = self._run_gh(
+            args,
+            action=action,
+            fields=fields,
+            allowed_returncodes=allowed_returncodes,
+        )
         try:
             return json.loads(result.stdout or "null")
         except JSONDecodeError as error:
@@ -282,6 +289,7 @@ class GitHubClient:
         *,
         action: str,
         fields: dict[str, str] | None = None,
+        allowed_returncodes: set[int] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = ["gh", *args]
         if fields:
@@ -299,7 +307,7 @@ class GitHubClient:
         except OSError as error:
             raise GitHubClientError(f"failed to {action} with gh: {error}") from error
 
-        if result.returncode != 0:
+        if result.returncode not in (allowed_returncodes or {0}):
             stderr = result.stderr.strip()
             message = stderr or (result.stdout.strip() if result.stdout else "")
             if not message:
