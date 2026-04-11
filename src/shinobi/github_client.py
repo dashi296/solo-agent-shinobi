@@ -222,7 +222,9 @@ class GitHubClient:
             return []
         if result.returncode == 1:
             message = result.stderr.strip() or result.stdout.strip() or "gh exited with status 1"
-            raise GitHubClientError(f"failed to load CI status for PR #{pr_number} with gh: {message}")
+            raise GitHubClientError(
+                f"failed to load CI status for PR #{pr_number} with gh: {message}"
+            )
 
         try:
             payload = json.loads(result.stdout or "null")
