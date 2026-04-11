@@ -81,10 +81,10 @@ def collect_changed_paths(root: Path, *, base_ref: str) -> list[str]:
 
 
 def collect_paths_against_base_ref(root: Path, *, base_ref: str) -> list[str]:
-    candidate_refs = [base_ref]
     remote_candidate = f"origin/{base_ref}"
+    candidate_refs = [remote_candidate]
     if remote_candidate != base_ref:
-        candidate_refs.append(remote_candidate)
+        candidate_refs.append(base_ref)
 
     errors: list[str] = []
     for candidate_ref in candidate_refs:
