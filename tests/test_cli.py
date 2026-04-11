@@ -751,7 +751,7 @@ class CliTest(unittest.TestCase):
                 self.assertIn("pr: 44", call.args[1])
             self.assertIsNone(store.load_lock())
 
-    def test_review_failed_ci_returns_nonzero_and_persists_failure_result(self) -> None:
+    def test_review_failed_ci_retries_once_and_persists_retry_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
@@ -789,6 +789,17 @@ class CliTest(unittest.TestCase):
                             ),
                         }
                     ]
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="retry verification passed",
+                    )
                     with patch("shinobi.cli.GitHubClient", return_value=client):
                         with patch(
                             "shinobi.cli.wait_for_ci",
@@ -798,26 +809,317 @@ class CliTest(unittest.TestCase):
                                         name="test",
                                         state="FAILURE",
                                         bucket="fail",
+                                        link="https://github.com/owner/repo/actions/runs/123456789/job/987",
                                     )
                                 ],
                                 status="failure",
                             ),
                         ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["review"])
+                            with patch(
+                                "shinobi.cli.execute_verification",
+                                return_value=execution_result,
+                            ) as execute_verification_mock:
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
             self.assertIn("ci_status: failure", rendered)
-            self.assertIn("ci_timed_out: False", rendered)
+            self.assertIn("review_loop_count: 1", rendered)
+            self.assertIn("review_result: retry", rendered)
+            self.assertIn("next_phase: review", rendered)
+            execute_verification_mock.assert_called_once()
+            client.rerun_workflow_run.assert_called_once_with("123456789", failed_only=True)
 
             saved_state = store.load_state()
             self.assertEqual(saved_state.phase, "review")
             self.assertEqual(saved_state.run_id, "publish-run")
-            self.assertEqual(saved_state.last_result, "ci-failure")
-            self.assertIsNone(saved_state.last_error)
+            self.assertEqual(saved_state.review_loop_count, 1)
+            self.assertEqual(saved_state.last_result, "review-retry")
+            self.assertEqual(
+                saved_state.last_error,
+                "CI failed; local verification passed and failed GitHub Actions workflow "
+                "run(s) were rerun: 123456789.",
+            )
             self.assertEqual(saved_state.extra["ci_status"]["status"], "failure")
             self.assertFalse(saved_state.extra["ci_status"]["timed_out"])
+            self.assertEqual(saved_state.extra["retry_verification"]["commands"][0]["status"], "passed")
+            self.assertEqual(saved_state.extra["retry_workflow_run_ids"], ["123456789"])
+            self.assertIsNone(store.load_lock())
+
+    def test_review_failed_ci_finalizes_needs_human_when_loop_limit_reached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            review_loop_count=3,
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
+                            with patch(
+                                "shinobi.cli.wait_for_ci",
+                                return_value=CIStatus(
+                                    checks=[
+                                        PullRequestCheck(
+                                            name="test",
+                                            state="FAILURE",
+                                            bucket="fail",
+                                        )
+                                    ],
+                                    status="failure",
+                                ),
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("review_result: needs-human", rendered)
+            self.assertIn("max_review_loops 3", rendered)
+            client.update_issue_labels.assert_any_call(
+                33,
+                add=[config.labels["needs_human"]],
+            )
+            client.update_issue_labels.assert_any_call(
+                33,
+                remove=[config.labels["reviewing"]],
+            )
+            self.assertEqual(client.create_issue_comment.call_count, 1)
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+            self.assertIsNone(store.load_lock())
+
+    def test_failed_actions_run_ids_extracts_unique_failed_action_runs(self) -> None:
+        status = CIStatus(
+            checks=[
+                PullRequestCheck(
+                    name="test",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/123456789/job/987",
+                ),
+                PullRequestCheck(
+                    name="lint",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/123456789",
+                ),
+                PullRequestCheck(
+                    name="docs",
+                    state="SUCCESS",
+                    bucket="pass",
+                    link="https://github.com/owner/repo/actions/runs/222",
+                ),
+                PullRequestCheck(
+                    name="external",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://ci.example.test/check/333",
+                ),
+                PullRequestCheck(
+                    name="same-path-external-host",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://ci.example.test/owner/repo/actions/runs/333",
+                ),
+                PullRequestCheck(
+                    name="other-repo",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/other/repo/actions/runs/444",
+                ),
+                PullRequestCheck(
+                    name="malformed-run-id",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/555abc",
+                ),
+            ],
+            status="failure",
+        )
+
+        self.assertEqual(
+            cli.failed_actions_run_ids(status, repo="owner/repo"),
+            ["123456789"],
+        )
+
+    def test_actions_run_retries_reruns_canceled_actions_runs_entirely(self) -> None:
+        status = CIStatus(
+            checks=[
+                PullRequestCheck(
+                    name="cancelled",
+                    state="CANCELLED",
+                    bucket="cancel",
+                    link="https://github.com/owner/repo/actions/runs/123456789",
+                ),
+                PullRequestCheck(
+                    name="failed",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/123456789",
+                ),
+                PullRequestCheck(
+                    name="other-failed",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/222",
+                ),
+            ],
+            status="failure",
+        )
+
+        retries = cli.actions_run_retries(status, repo="owner/repo")
+
+        self.assertEqual(
+            retries,
+            [
+                cli.ActionsRunRetry(run_id="123456789", failed_only=False),
+                cli.ActionsRunRetry(run_id="222", failed_only=True),
+            ],
+        )
+
+    def test_review_failed_ci_finalizes_needs_human_when_retry_verification_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            review_loop_count=1,
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="failed",
+                                returncode=1,
+                            )
+                        ],
+                        change_summary="retry verification failed",
+                    )
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.mission_finalize.GitHubClient",
+                            return_value=client,
+                        ):
+                            with patch(
+                                "shinobi.cli.wait_for_ci",
+                                return_value=CIStatus(
+                                    checks=[
+                                        PullRequestCheck(
+                                            name="test",
+                                            state="FAILURE",
+                                            bucket="fail",
+                                        )
+                                    ],
+                                    status="failure",
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.execute_verification",
+                                    return_value=execution_result,
+                                ) as execute_verification_mock:
+                                    with redirect_stdout(output):
+                                        exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("review_result: needs-human", rendered)
+            self.assertIn("local verification failed", rendered)
+            execute_verification_mock.assert_called_once()
+            client.rerun_workflow_run.assert_not_called()
+            client.update_issue_labels.assert_any_call(
+                33,
+                add=[config.labels["needs_human"]],
+            )
+            client.update_issue_labels.assert_any_call(
+                33,
+                remove=[config.labels["reviewing"]],
+            )
+            self.assertEqual(client.create_issue_comment.call_count, 1)
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
             self.assertIsNone(store.load_lock())
 
     def test_review_persists_last_error_when_ci_polling_aborts(self) -> None:
@@ -5683,6 +5985,42 @@ class GitHubClientTest(unittest.TestCase):
                 client.close_issue(6)
 
         self.assertEqual(run_mock.call_args.args[0][:4], ["gh", "issue", "close", "6"])
+
+    def test_rerun_workflow_run_scopes_command_to_repo(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "run", "rerun", "123456789"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.rerun_workflow_run("123456789")
+
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["gh", "run", "rerun", "123456789", "--failed", "--repo", "owner/repo"],
+        )
+
+    def test_rerun_workflow_run_can_rerun_entire_run(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "run", "rerun", "123456789"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.rerun_workflow_run("123456789", failed_only=False)
+
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["gh", "run", "rerun", "123456789", "--repo", "owner/repo"],
+        )
 
     def test_list_issue_comments_reads_comments_from_issue_view(self) -> None:
         response = subprocess.CompletedProcess(
