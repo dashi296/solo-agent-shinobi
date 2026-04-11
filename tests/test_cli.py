@@ -40,7 +40,16 @@ from shinobi.mission_start import (
     handoff_started_mission,
     start_mission,
 )
-from shinobi.models import Config, ExecutionResult, MissionSummary, State, VerificationCommandResult
+from shinobi.models import (
+    Config,
+    DiffStats,
+    ExecutionResult,
+    MissionSummary,
+    ReviewDecision,
+    State,
+    VerificationCommandResult,
+)
+from shinobi.reviewer import ReviewerError, collect_diff_stats, evaluate_review, parse_numstat
 from shinobi.state_store import StateStore
 
 
@@ -4472,6 +4481,73 @@ assert (workspace / ".shinobi" / "templates" / "review-note-rule.md").exists()
             )
             self.assertEqual(repaired_state["branch"], "feature/test")
             self.assertEqual(repaired_state["future_field"], {"enabled": True})
+
+
+class ReviewerTest(unittest.TestCase):
+    def test_parse_numstat_counts_changed_files_and_lines(self) -> None:
+        stats = parse_numstat("12\t3\tsrc/shinobi/reviewer.py\n-\t-\tassets/logo.png\n")
+
+        self.assertEqual(
+            stats,
+            DiffStats(
+                changed_files=2,
+                added_lines=12,
+                deleted_lines=3,
+            ),
+        )
+        self.assertEqual(stats.total_changed_lines, 15)
+
+    def test_collect_diff_stats_wraps_git_failures(self) -> None:
+        with patch(
+            "shinobi.reviewer.subprocess.run",
+            return_value=Mock(returncode=1, stdout="", stderr="unknown revision"),
+        ):
+            with self.assertRaisesRegex(
+                ReviewerError,
+                "failed to collect diff stats against origin/main: unknown revision",
+            ):
+                collect_diff_stats(Path("/tmp/repo"), base_ref="origin/main")
+
+    def test_evaluate_review_allows_safe_diff(self) -> None:
+        decision = evaluate_review(
+            config=Config(repo="owner/repo"),
+            state=State(review_loop_count=1),
+            issue={"number": 34, "labels": [{"name": "priority:medium"}]},
+            diff_stats=DiffStats(changed_files=3, added_lines=20, deleted_lines=5),
+        )
+
+        self.assertEqual(decision, ReviewDecision(should_stop=False, reasons=[]))
+        self.assertTrue(decision.can_continue)
+
+    def test_evaluate_review_stops_for_risky_label_and_size_limits(self) -> None:
+        config = Config(
+            repo="owner/repo",
+            max_changed_files=5,
+            max_lines_changed=20,
+            max_review_loops=2,
+        )
+
+        decision = evaluate_review(
+            config=config,
+            state=State(review_loop_count=2),
+            issue={
+                "number": 34,
+                "labels": [{"name": "shinobi:risky"}],
+            },
+            diff_stats=DiffStats(changed_files=6, added_lines=12, deleted_lines=15),
+        )
+
+        self.assertTrue(decision.should_stop)
+        self.assertFalse(decision.can_continue)
+        self.assertEqual(
+            decision.reasons,
+            [
+                "issue #34 has label shinobi:risky, requiring human review",
+                "changed files 6 exceed max_changed_files 5",
+                "total changed lines 27 exceed max_lines_changed 20",
+                "review loop count 2 reached max_review_loops 2",
+            ],
+        )
 
 
 if __name__ == "__main__":
