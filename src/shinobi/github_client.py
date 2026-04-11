@@ -77,13 +77,13 @@ class GitHubClient:
 
     def create_issue_comment(self, issue_number: int, body: str) -> None:
         self._run_gh(
-            ["issue", "comment", str(issue_number), "--body", body],
+            self._with_repo(["issue", "comment", str(issue_number), "--body", body]),
             action=f"create comment on issue #{issue_number}",
         )
 
     def close_issue(self, issue_number: int) -> None:
         self._run_gh(
-            ["issue", "close", str(issue_number)],
+            self._with_repo(["issue", "close", str(issue_number)]),
             action=f"close issue #{issue_number}",
         )
 
@@ -142,7 +142,7 @@ class GitHubClient:
         ]
         if draft:
             args.append("--draft")
-        self._run_gh(args, action=f"create PR from {head} into {base}")
+        self._run_gh(self._with_repo(args), action=f"create PR from {head} into {base}")
         return self.get_pull_request(head)
 
     def update_pull_request(
@@ -160,26 +160,28 @@ class GitHubClient:
             args.extend(["--body", body])
         if base is not None:
             args.extend(["--base", base])
-        self._run_gh(args, action=f"update PR #{pr_number}")
+        self._run_gh(self._with_repo(args), action=f"update PR #{pr_number}")
         return self.get_pull_request(str(pr_number))
 
     def convert_pull_request_to_draft(self, pr_number: int) -> dict[str, Any]:
         self._run_gh(
-            ["pr", "ready", str(pr_number), "--undo"],
+            self._with_repo(["pr", "ready", str(pr_number), "--undo"]),
             action=f"convert PR #{pr_number} to draft",
         )
         return self.get_pull_request(str(pr_number))
 
     def convert_pull_request_to_ready(self, pr_number: int) -> dict[str, Any]:
         self._run_gh(
-            ["pr", "ready", str(pr_number)],
+            self._with_repo(["pr", "ready", str(pr_number)]),
             action=f"mark PR #{pr_number} ready for review",
         )
         return self.get_pull_request(str(pr_number))
 
     def get_pull_request(self, identifier: str) -> dict[str, Any]:
         payload = self._run_gh_json(
-            ["pr", "view", identifier, "--json", "number,url,isDraft,headRefName,baseRefName"],
+            self._with_repo(
+                ["pr", "view", identifier, "--json", "number,url,isDraft,headRefName,baseRefName"]
+            ),
             action=f"load PR {identifier}",
         )
         if not isinstance(payload, dict):
@@ -188,16 +190,18 @@ class GitHubClient:
 
     def list_pull_requests_by_head(self, head: str) -> list[dict[str, Any]]:
         payload = self._run_gh_json(
-            [
-                "pr",
-                "list",
-                "--head",
-                head,
-                "--state",
-                "open",
-                "--json",
-                "number,url,isDraft,headRefName,baseRefName",
-            ],
+            self._with_repo(
+                [
+                    "pr",
+                    "list",
+                    "--head",
+                    head,
+                    "--state",
+                    "open",
+                    "--json",
+                    "number,url,isDraft,headRefName,baseRefName",
+                ]
+            ),
             action=f"list PRs for head {head}",
         )
         if not isinstance(payload, list):
@@ -208,13 +212,15 @@ class GitHubClient:
 
     def get_ci_status(self, pr_number: int) -> list[dict[str, Any]]:
         result = self._run_gh(
-            [
-                "pr",
-                "checks",
-                str(pr_number),
-                "--json",
-                "name,state,link,bucket",
-            ],
+            self._with_repo(
+                [
+                    "pr",
+                    "checks",
+                    str(pr_number),
+                    "--json",
+                    "name,state,link,bucket",
+                ]
+            ),
             action=f"load CI status for PR #{pr_number}",
             allowed_returncodes={0, 1, 8},
         )
@@ -245,10 +251,9 @@ class GitHubClient:
         args = ["run", "rerun", run_id]
         if failed_only:
             args.append("--failed")
-        args.extend(["--repo", self.repo])
         rerun_target = "failed jobs for" if failed_only else "entire"
         self._run_gh(
-            args,
+            self._with_repo(args),
             action=f"rerun {rerun_target} workflow run {run_id}",
         )
 
@@ -262,13 +267,16 @@ class GitHubClient:
         args = ["pr", "merge", str(pr_number), f"--{merge_method}"]
         if delete_branch:
             args.append("--delete-branch")
-        self._run_gh(args, action=f"merge PR #{pr_number}")
+        self._run_gh(self._with_repo(args), action=f"merge PR #{pr_number}")
 
     def _issue_edit(self, issue_number: int, args: list[str], action: str) -> None:
         self._run_gh(
-            ["issue", "edit", str(issue_number), *args],
+            self._with_repo(["issue", "edit", str(issue_number), *args]),
             action=f"{action} for issue #{issue_number}",
         )
+
+    def _with_repo(self, args: list[str]) -> list[str]:
+        return [*args, "--repo", self.repo]
 
     def _api_json(
         self,
