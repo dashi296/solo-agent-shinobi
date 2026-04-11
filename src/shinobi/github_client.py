@@ -207,7 +207,7 @@ class GitHubClient:
         return [pr for pr in payload if isinstance(pr, dict)]
 
     def get_ci_status(self, pr_number: int) -> list[dict[str, Any]]:
-        payload = self._run_gh_json(
+        result = self._run_gh(
             [
                 "pr",
                 "checks",
@@ -216,7 +216,25 @@ class GitHubClient:
                 "name,state,link,bucket",
             ],
             action=f"load CI status for PR #{pr_number}",
+            allowed_returncodes={0, 1, 8},
         )
+        output = result.stdout.strip()
+        error_output = result.stderr.strip()
+        combined_output = f"{output}\n{error_output}".lower()
+        if result.returncode == 1 and "no checks reported" in combined_output:
+            return []
+        if result.returncode == 1 and not output:
+            message = error_output or "gh exited with status 1"
+            raise GitHubClientError(
+                f"failed to load CI status for PR #{pr_number} with gh: {message}"
+            )
+
+        try:
+            payload = json.loads(result.stdout or "null")
+        except JSONDecodeError as error:
+            raise GitHubClientError(
+                f"failed to parse GitHub response while trying to load CI status for PR #{pr_number}"
+            ) from error
         if not isinstance(payload, list):
             raise GitHubClientError(
                 f"failed to parse CI status for PR #{pr_number}: expected list payload"
@@ -269,8 +287,14 @@ class GitHubClient:
         *,
         action: str,
         fields: dict[str, str] | None = None,
+        allowed_returncodes: set[int] | None = None,
     ) -> Any:
-        result = self._run_gh(args, action=action, fields=fields)
+        result = self._run_gh(
+            args,
+            action=action,
+            fields=fields,
+            allowed_returncodes=allowed_returncodes,
+        )
         try:
             return json.loads(result.stdout or "null")
         except JSONDecodeError as error:
@@ -282,6 +306,7 @@ class GitHubClient:
         *,
         action: str,
         fields: dict[str, str] | None = None,
+        allowed_returncodes: set[int] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         command = ["gh", *args]
         if fields:
@@ -299,7 +324,7 @@ class GitHubClient:
         except OSError as error:
             raise GitHubClientError(f"failed to {action} with gh: {error}") from error
 
-        if result.returncode != 0:
+        if result.returncode not in (allowed_returncodes or {0}):
             stderr = result.stderr.strip()
             message = stderr or (result.stdout.strip() if result.stdout else "")
             if not message:

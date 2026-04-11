@@ -209,3 +209,42 @@ class ReviewDecision:
     @property
     def can_continue(self) -> bool:
         return not self.should_stop
+
+
+@dataclass(frozen=True)
+class PullRequestCheck:
+    name: str
+    state: str
+    bucket: str
+    link: str | None = None
+
+    @property
+    def is_pending(self) -> bool:
+        return self.bucket == "pending"
+
+    @property
+    def is_successful(self) -> bool:
+        return self.bucket in {"pass", "skipping"}
+
+    @property
+    def is_failed(self) -> bool:
+        return self.bucket in {"fail", "cancel"}
+
+
+@dataclass(frozen=True)
+class CIStatus:
+    checks: List[PullRequestCheck]
+    status: str
+    timed_out: bool = False
+
+    @property
+    def is_pending(self) -> bool:
+        return self.status == "pending"
+
+    @property
+    def is_successful(self) -> bool:
+        return self.status == "success"
+
+    @property
+    def is_failed(self) -> bool:
+        return self.status == "failure"

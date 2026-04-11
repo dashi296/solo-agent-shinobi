@@ -67,16 +67,17 @@ shinobi status
 
 ## CLI 設計
 
-MVP では次の 4 コマンドをサポートします。
+MVP では次の 5 コマンドをサポートします。
 
 ```bash
 shinobi init
 shinobi status
 shinobi run
 shinobi run --issue 123
+shinobi review
 ```
 
-`plan` `execute` `review` `merge` `watch` は将来コマンド候補ですが、MVP では公開コマンドに含めません。
+`plan` `execute` `merge` `watch` は将来コマンド候補です。
 
 ### `shinobi init`
 

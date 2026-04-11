@@ -47,16 +47,25 @@ from shinobi.mission_start import (
     start_mission,
 )
 from shinobi.models import (
+    CIStatus,
     Config,
     DiffStats,
     ExecutionResult,
     MissionSummary,
+    PullRequestCheck,
     ReviewDecision,
     StopDecision,
     State,
     VerificationCommandResult,
 )
-from shinobi.reviewer import ReviewerError, collect_diff_stats, evaluate_review, parse_numstat
+from shinobi.reviewer import (
+    ReviewerError,
+    collect_ci_status,
+    collect_diff_stats,
+    evaluate_review,
+    parse_numstat,
+    wait_for_ci,
+)
 from shinobi.state_store import StateStore
 
 
@@ -517,6 +526,542 @@ class CliTest(unittest.TestCase):
             self.assertFalse(store.paths.summary_path.exists())
             self.assertFalse(store.paths.decisions_path.exists())
             self.assertFalse(store.paths.lock_path.exists())
+
+    def test_review_waits_for_ci_and_persists_review_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    client = Mock()
+                    output = io.StringIO()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: publish\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            return_value=CIStatus(
+                                checks=[
+                                    PullRequestCheck(
+                                        name="test",
+                                        state="SUCCESS",
+                                        bucket="pass",
+                                    )
+                                ],
+                                status="success",
+                            ),
+                        ) as wait_for_ci_mock:
+                            with redirect_stdout(output):
+                                exit_code = cli.main(
+                                    [
+                                        "review",
+                                        "--timeout-seconds",
+                                        "30",
+                                        "--poll-interval-seconds",
+                                        "5",
+                                    ]
+                                )
+
+            self.assertEqual(exit_code, 0)
+            rendered = output.getvalue()
+            self.assertIn("review_issue: #33", rendered)
+            self.assertIn("review_pr: #44", rendered)
+            self.assertIn("ci_status: success", rendered)
+            self.assertIn("ci_checks: test=pass", rendered)
+            wait_for_ci_mock.assert_called_once()
+            self.assertIs(wait_for_ci_mock.call_args.args[0], client)
+            self.assertEqual(wait_for_ci_mock.call_args.args[1], 44)
+            self.assertEqual(wait_for_ci_mock.call_args.kwargs["timeout_seconds"], 30.0)
+            self.assertEqual(wait_for_ci_mock.call_args.kwargs["poll_interval_seconds"], 5.0)
+            self.assertIsNotNone(wait_for_ci_mock.call_args.kwargs["heartbeat"])
+            self.assertEqual(client.update_issue_comment.call_count, 2)
+            self.assertIn("phase: review", client.update_issue_comment.call_args_list[0].args[1])
+            self.assertIn("pr: 44", client.update_issue_comment.call_args_list[0].args[1])
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
+            self.assertEqual(saved_state.last_result, "ci-success")
+            self.assertIsNone(saved_state.last_error)
+            self.assertEqual(saved_state.extra["ci_status"]["status"], "success")
+            self.assertFalse(saved_state.extra["ci_status"]["timed_out"])
+            self.assertEqual(saved_state.extra["ci_status"]["checks"][0]["name"], "test")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_timeout_returns_nonzero_and_persists_pending_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: publish\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            return_value=CIStatus(
+                                checks=[
+                                    PullRequestCheck(
+                                        name="test",
+                                        state="QUEUED",
+                                        bucket="pending",
+                                    )
+                                ],
+                                status="pending",
+                                timed_out=True,
+                            ),
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("ci_status: pending", rendered)
+            self.assertIn("ci_timed_out: True", rendered)
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
+            self.assertEqual(saved_state.last_result, "ci-timeout")
+            self.assertEqual(saved_state.last_error, "CI polling timed out before checks completed")
+            self.assertTrue(saved_state.extra["ci_status"]["timed_out"])
+            self.assertIsNone(store.load_lock())
+
+    def test_review_heartbeat_updates_mission_state_comment_during_polling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: publish\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+
+                    def wait_for_ci_side_effect(*_args, **kwargs):
+                        kwargs["heartbeat"]()
+                        return CIStatus(
+                            checks=[
+                                PullRequestCheck(
+                                    name="test",
+                                    state="SUCCESS",
+                                    bucket="pass",
+                                )
+                            ],
+                            status="success",
+                        )
+
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            side_effect=wait_for_ci_side_effect,
+                        ):
+                            with redirect_stdout(io.StringIO()):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(client.update_issue_comment.call_count, 3)
+            for call in client.update_issue_comment.call_args_list:
+                self.assertIn("phase: review", call.args[1])
+                self.assertIn("pr: 44", call.args[1])
+            self.assertIsNone(store.load_lock())
+
+    def test_review_failed_ci_returns_nonzero_and_persists_failure_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: publish\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            return_value=CIStatus(
+                                checks=[
+                                    PullRequestCheck(
+                                        name="test",
+                                        state="FAILURE",
+                                        bucket="fail",
+                                    )
+                                ],
+                                status="failure",
+                            ),
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("ci_status: failure", rendered)
+            self.assertIn("ci_timed_out: False", rendered)
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
+            self.assertEqual(saved_state.last_result, "ci-failure")
+            self.assertIsNone(saved_state.last_error)
+            self.assertEqual(saved_state.extra["ci_status"]["status"], "failure")
+            self.assertFalse(saved_state.extra["ci_status"]["timed_out"])
+            self.assertIsNone(store.load_lock())
+
+    def test_review_persists_last_error_when_ci_polling_aborts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: publish\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            side_effect=ReviewerError("api unavailable"),
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("review aborted: api unavailable", output.getvalue())
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
+            self.assertEqual(saved_state.last_result, "review-error")
+            self.assertEqual(saved_state.last_error, "api unavailable")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_persists_last_error_when_completion_comment_update_aborts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: publish\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.update_issue_comment.side_effect = [
+                        None,
+                        GitHubClientError("failed to write review heartbeat comment"),
+                    ]
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            return_value=CIStatus(
+                                checks=[
+                                    PullRequestCheck(
+                                        name="test",
+                                        state="SUCCESS",
+                                        bucket="pass",
+                                    )
+                                ],
+                                status="success",
+                            ),
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: failed to upsert review mission-state comment for issue #33: "
+                "failed to write review heartbeat comment",
+                output.getvalue(),
+            )
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
+            self.assertEqual(saved_state.last_result, "review-error")
+            self.assertEqual(
+                saved_state.last_error,
+                "failed to upsert review mission-state comment for issue #33: "
+                "failed to write review heartbeat comment",
+            )
+            self.assertIsNone(store.load_lock())
+
+    def test_review_aborts_when_active_mission_lacks_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id=None,
+                            phase="publish",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: local mission state requires issue_number, pr_number, branch, "
+                "and run_id",
+                output.getvalue(),
+            )
+
+    def test_review_aborts_when_active_mission_belongs_to_different_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity="other-agent",
+                            run_id="publish-run",
+                            phase="publish",
+                        )
+                    )
+
+                    client = Mock()
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: local mission state belongs to a different agent (other-agent)",
+                output.getvalue(),
+            )
+            client.assert_not_called()
+            self.assertIsNone(store.load_lock())
+
+    def test_review_rejects_invalid_poll_interval_before_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    original_state = State(
+                        issue_number=33,
+                        pr_number=44,
+                        branch="feature/issue-33-review-ci",
+                        agent_identity=config.agent_identity,
+                        run_id="publish-run",
+                        phase="publish",
+                        last_result="published",
+                    )
+                    store.save_state(original_state)
+
+                    output = io.StringIO()
+                    client = Mock()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with redirect_stdout(output):
+                            exit_code = cli.command_review(
+                                root,
+                                timeout_seconds=30,
+                                poll_interval_seconds=0,
+                            )
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: poll_interval_seconds must be positive",
+                output.getvalue(),
+            )
+            self.assertEqual(store.load_state(), original_state)
+            client.assert_not_called()
+            self.assertIsNone(store.load_lock())
 
     def test_init_preserves_state_agent_identity_when_config_is_recreated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5004,6 +5549,89 @@ class GitHubClientTest(unittest.TestCase):
                 ):
                     client.get_issue(6)
 
+    def test_get_ci_status_accepts_pending_exit_code_from_gh_pr_checks(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "pr", "checks", "44"],
+            returncode=8,
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test",
+                        "state": "IN_PROGRESS",
+                        "bucket": "pending",
+                        "link": "https://ci/test",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                client = GitHubClient(Path("/tmp/repo"))
+                status = client.get_ci_status(44)
+
+        self.assertEqual(
+            status,
+            [
+                {
+                    "name": "test",
+                    "state": "IN_PROGRESS",
+                    "bucket": "pending",
+                    "link": "https://ci/test",
+                }
+            ],
+        )
+
+    def test_get_ci_status_treats_no_checks_reported_as_empty_status(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "pr", "checks", "44"],
+            returncode=1,
+            stdout="",
+            stderr="no checks reported on the 'feature/test' branch\n",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                client = GitHubClient(Path("/tmp/repo"))
+                status = client.get_ci_status(44)
+
+        self.assertEqual(status, [])
+
+    def test_get_ci_status_accepts_failed_checks_from_exit_code_one(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "pr", "checks", "44"],
+            returncode=1,
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test",
+                        "state": "FAILURE",
+                        "bucket": "fail",
+                        "link": "https://ci/test",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=result):
+                client = GitHubClient(Path("/tmp/repo"))
+                status = client.get_ci_status(44)
+
+        self.assertEqual(
+            status,
+            [
+                {
+                    "name": "test",
+                    "state": "FAILURE",
+                    "bucket": "fail",
+                    "link": "https://ci/test",
+                }
+            ],
+        )
+
     def test_update_issue_labels_runs_add_then_remove_operations(self) -> None:
         responses = [
             subprocess.CompletedProcess(args=["gh", "issue", "edit", "6"], returncode=0, stdout="", stderr=""),
@@ -5637,6 +6265,154 @@ class ReviewerTest(unittest.TestCase):
                 "review loop count 2 reached max_review_loops 2",
             ],
         )
+
+    def test_collect_ci_status_classifies_checks(self) -> None:
+        client = Mock()
+        client.get_ci_status.return_value = [
+            {"name": "lint", "state": "SUCCESS", "bucket": "pass", "link": "https://ci/lint"},
+            {"name": "test", "state": "IN_PROGRESS", "bucket": "pending"},
+        ]
+
+        status = collect_ci_status(client, 51)
+
+        self.assertEqual(
+            status,
+            CIStatus(
+                checks=[
+                    PullRequestCheck(
+                        name="lint",
+                        state="SUCCESS",
+                        bucket="pass",
+                        link="https://ci/lint",
+                    ),
+                    PullRequestCheck(
+                        name="test",
+                        state="IN_PROGRESS",
+                        bucket="pending",
+                        link=None,
+                    ),
+                ],
+                status="pending",
+            ),
+        )
+        self.assertTrue(status.is_pending)
+
+    def test_collect_ci_status_wraps_github_errors(self) -> None:
+        client = Mock()
+        client.get_ci_status.side_effect = GitHubClientError("api unavailable")
+
+        with self.assertRaisesRegex(
+            ReviewerError,
+            "failed to load CI status for PR #51: api unavailable",
+        ):
+            collect_ci_status(client, 51)
+
+    def test_wait_for_ci_polls_until_success_and_calls_heartbeat(self) -> None:
+        client = Mock()
+        client.get_ci_status.side_effect = [
+            [{"name": "test", "state": "IN_PROGRESS", "bucket": "pending"}],
+            [{"name": "test", "state": "SUCCESS", "bucket": "pass"}],
+        ]
+        heartbeats: list[str] = []
+        slept: list[float] = []
+        clock = {"now": 0.0}
+
+        def heartbeat() -> None:
+            heartbeats.append("tick")
+
+        def monotonic() -> float:
+            return clock["now"]
+
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            clock["now"] += seconds
+
+        status = wait_for_ci(
+            client,
+            51,
+            timeout_seconds=30,
+            poll_interval_seconds=5,
+            heartbeat=heartbeat,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+
+        self.assertEqual(
+            status,
+            CIStatus(
+                checks=[
+                    PullRequestCheck(
+                        name="test",
+                        state="SUCCESS",
+                        bucket="pass",
+                        link=None,
+                    )
+                ],
+                status="success",
+            ),
+        )
+        self.assertEqual(heartbeats, ["tick", "tick"])
+        self.assertEqual(slept, [5])
+
+    def test_wait_for_ci_returns_timed_out_pending_result(self) -> None:
+        client = Mock()
+        client.get_ci_status.return_value = [
+            {"name": "test", "state": "QUEUED", "bucket": "pending"}
+        ]
+        clock = {"now": 0.0}
+
+        def monotonic() -> float:
+            return clock["now"]
+
+        def sleep(seconds: float) -> None:
+            clock["now"] += seconds
+
+        status = wait_for_ci(
+            client,
+            51,
+            timeout_seconds=4,
+            poll_interval_seconds=2,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+
+        self.assertEqual(
+            status,
+            CIStatus(
+                checks=[
+                    PullRequestCheck(
+                        name="test",
+                        state="QUEUED",
+                        bucket="pending",
+                        link=None,
+                    )
+                ],
+                status="pending",
+                timed_out=True,
+            ),
+        )
+
+    def test_collect_ci_status_treats_missing_checks_as_pending(self) -> None:
+        client = Mock()
+        client.get_ci_status.return_value = []
+
+        status = collect_ci_status(client, 51)
+
+        self.assertEqual(status, CIStatus(checks=[], status="pending"))
+        self.assertTrue(status.is_pending)
+
+    def test_collect_ci_status_falls_back_to_failure_for_terminal_states(self) -> None:
+        client = Mock()
+        client.get_ci_status.return_value = [
+            {"name": "deploy", "state": "ACTION_REQUIRED"},
+            {"name": "build", "state": "STARTUP_FAILURE"},
+        ]
+
+        status = collect_ci_status(client, 51)
+
+        self.assertEqual(status.status, "failure")
+        self.assertTrue(status.is_failed)
+        self.assertEqual([check.bucket for check in status.checks], ["fail", "fail"])
 
 
 if __name__ == "__main__":
