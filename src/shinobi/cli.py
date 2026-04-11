@@ -25,6 +25,7 @@ from .mission_publish import (
     load_publishable_issue_label_names,
     publish_mission,
     stop_publish_for_blocking_labels,
+    upsert_review_comment,
 )
 from .mission_start import (
     MissionStartError,
@@ -375,6 +376,7 @@ def command_review(
 
     run_id = state.run_id
     now = datetime.now(timezone.utc)
+    lease_expires_at = store.format_timestamp(now + timedelta(minutes=config.mission_lease_minutes))
     try:
         store.acquire_lock(
             config=config,
@@ -398,9 +400,7 @@ def command_review(
                     phase="review",
                     review_loop_count=state.review_loop_count,
                     retryable_local_only=False,
-                    lease_expires_at=store.format_timestamp(
-                        now + timedelta(minutes=config.mission_lease_minutes)
-                    ),
+                    lease_expires_at=lease_expires_at,
                     last_result=state.last_result,
                     last_error=None,
                     last_mission=state.last_mission,
@@ -412,6 +412,20 @@ def command_review(
             return 1
 
         client = GitHubClient(root, repo=config.repo)
+
+        def update_review_comment(*, comment_lease_expires_at: str) -> None:
+            try:
+                upsert_review_comment(
+                    client=client,
+                    issue_number=state.issue_number,
+                    branch=state.branch,
+                    pr_number=state.pr_number,
+                    lease_expires_at=comment_lease_expires_at,
+                    agent_identity=config.agent_identity,
+                    run_id=run_id,
+                )
+            except MissionPublishError as error:
+                raise ReviewerError(str(error)) from error
 
         def persist_review_error(error_message: str) -> None:
             try:
@@ -440,13 +454,18 @@ def command_review(
 
         def heartbeat() -> None:
             heartbeat_now = datetime.now(timezone.utc)
+            heartbeat_lease_expires_at = store.format_timestamp(
+                heartbeat_now + timedelta(minutes=config.mission_lease_minutes)
+            )
             store.refresh_lock_heartbeat(
                 run_id=run_id,
                 agent_identity=config.agent_identity,
                 now=heartbeat_now,
             )
+            update_review_comment(comment_lease_expires_at=heartbeat_lease_expires_at)
 
         try:
+            update_review_comment(comment_lease_expires_at=lease_expires_at)
             ci_status = wait_for_ci(
                 client,
                 state.pr_number,
@@ -459,6 +478,11 @@ def command_review(
             print(f"review aborted: {error}")
             return 1
 
+        completed_at = datetime.now(timezone.utc)
+        completed_lease_expires_at = store.format_timestamp(
+            completed_at + timedelta(minutes=config.mission_lease_minutes)
+        )
+        update_review_comment(comment_lease_expires_at=completed_lease_expires_at)
         review_state = State(
             issue_number=state.issue_number,
             pr_number=state.pr_number,
@@ -468,9 +492,7 @@ def command_review(
             phase="review",
             review_loop_count=state.review_loop_count,
             retryable_local_only=False,
-            lease_expires_at=store.format_timestamp(
-                datetime.now(timezone.utc) + timedelta(minutes=config.mission_lease_minutes)
-            ),
+            lease_expires_at=completed_lease_expires_at,
             last_result=render_review_result(ci_status),
             last_error="CI polling timed out before checks completed" if ci_status.timed_out else None,
             last_mission=state.last_mission,
