@@ -51,10 +51,9 @@ def detect_high_risk_stop(root: Path, config: Config) -> StopDecision | None:
 
 def collect_changed_paths(root: Path, *, base_ref: str) -> list[str]:
     changed_paths = set(
-        run_changed_paths_command(
+        collect_paths_against_base_ref(
             root,
-            ["git", "diff", "--name-only", "--diff-filter=ACMRD", f"{base_ref}...HEAD"],
-            error_context=f"failed to collect changed paths against {base_ref}",
+            base_ref=base_ref,
         )
     )
     changed_paths.update(
@@ -79,6 +78,36 @@ def collect_changed_paths(root: Path, *, base_ref: str) -> list[str]:
         )
     )
     return sorted(changed_paths)
+
+
+def collect_paths_against_base_ref(root: Path, *, base_ref: str) -> list[str]:
+    candidate_refs = [base_ref]
+    remote_candidate = f"origin/{base_ref}"
+    if remote_candidate != base_ref:
+        candidate_refs.append(remote_candidate)
+
+    errors: list[str] = []
+    for candidate_ref in candidate_refs:
+        try:
+            return run_changed_paths_command(
+                root,
+                ["git", "diff", "--name-only", "--diff-filter=ACMRD", f"{candidate_ref}...HEAD"],
+                error_context=f"failed to collect changed paths against {candidate_ref}",
+            )
+        except RuntimeError as error:
+            error_message = str(error)
+            if not is_missing_revision_error(error_message) or candidate_ref == candidate_refs[-1]:
+                errors.append(error_message)
+                break
+            errors.append(error_message)
+
+    joined_errors = "; ".join(errors)
+    raise RuntimeError(joined_errors)
+
+
+def is_missing_revision_error(message: str) -> bool:
+    lowered = message.lower()
+    return "unknown revision" in lowered or "bad revision" in lowered
 
 
 def run_changed_paths_command(

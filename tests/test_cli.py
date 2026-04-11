@@ -4615,6 +4615,53 @@ class ExecutorTest(unittest.TestCase):
             ):
                 collect_changed_paths(Path("/tmp/repo"), base_ref="main")
 
+    def test_collect_changed_paths_falls_back_to_origin_main_when_local_main_is_missing(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=1,
+                stdout="",
+                stderr="unknown revision",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="auth/login.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses) as run_mock:
+            changed = collect_changed_paths(Path("/tmp/repo"), base_ref="main")
+
+        self.assertEqual(changed, ["auth/login.py"])
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            ["git", "diff", "--name-only", "--diff-filter=ACMRD", "main...HEAD"],
+        )
+        self.assertEqual(
+            run_mock.call_args_list[1].args[0],
+            ["git", "diff", "--name-only", "--diff-filter=ACMRD", "origin/main...HEAD"],
+        )
+
     def test_collect_changed_paths_includes_deleted_staged_unstaged_and_untracked_files(self) -> None:
         responses = [
             subprocess.CompletedProcess(
