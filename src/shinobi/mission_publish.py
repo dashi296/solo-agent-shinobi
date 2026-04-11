@@ -372,13 +372,22 @@ def create_or_update_pull_request(
             f"failed to update PR #{existing_pr.get('number')} for issue #{issue_number}: {error}"
         ) from error
 
-    if config.use_draft_pr and not bool(updated_pr.get("isDraft")):
-        pr_number = int(updated_pr["number"])
+    is_draft = bool(updated_pr.get("isDraft"))
+    pr_number = int(updated_pr["number"])
+    if config.use_draft_pr and not is_draft:
         try:
             return client.convert_pull_request_to_draft(pr_number)
         except GitHubClientError as error:
             raise MissionPublishError(
                 f"failed to convert PR #{pr_number} to draft for issue #{issue_number}: {error}"
+            ) from error
+    if not config.use_draft_pr and is_draft:
+        try:
+            return client.convert_pull_request_to_ready(pr_number)
+        except GitHubClientError as error:
+            raise MissionPublishError(
+                "failed to mark PR "
+                f"#{pr_number} ready for review for issue #{issue_number}: {error}"
             ) from error
 
     return updated_pr
@@ -674,7 +683,7 @@ def render_publish_comment(
         f"run_id: {run_id}\n"
         "-->\n"
         "Shinobi Publish\n\n"
-        f"任務 #{issue_number} の draft PR を公開しました。\n"
+        f"任務 #{issue_number} の PR を公開しました。\n"
         f"- pr: #{pr_number}\n"
     )
 

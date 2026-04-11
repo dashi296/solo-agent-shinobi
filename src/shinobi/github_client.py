@@ -164,6 +164,13 @@ class GitHubClient:
         )
         return self.get_pull_request(str(pr_number))
 
+    def convert_pull_request_to_ready(self, pr_number: int) -> dict[str, Any]:
+        self._run_gh(
+            ["pr", "ready", str(pr_number)],
+            action=f"mark PR #{pr_number} ready for review",
+        )
+        return self.get_pull_request(str(pr_number))
+
     def get_pull_request(self, identifier: str) -> dict[str, Any]:
         payload = self._run_gh_json(
             ["pr", "view", identifier, "--json", "number,url,isDraft,headRefName,baseRefName"],
