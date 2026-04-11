@@ -778,17 +778,16 @@ def failed_actions_run_ids(ci_status: Any, *, repo: str) -> list[str]:
 
 
 def parse_actions_run_id(link: str, *, repo: str) -> str | None:
-    marker = f"/{repo.strip('/')}/actions/runs/"
     parsed = urlparse(link)
-    if not parsed.path.startswith(marker):
+    repo_parts = [part for part in repo.strip("/").split("/") if part]
+    path_parts = [part for part in parsed.path.split("/") if part]
+    expected_prefix = [*repo_parts, "actions", "runs"]
+    if path_parts[: len(expected_prefix)] != expected_prefix:
         return None
-    suffix = parsed.path[len(marker):]
-    run_id = ""
-    for character in suffix:
-        if not character.isdigit():
-            break
-        run_id += character
-    return run_id or None
+    if len(path_parts) <= len(expected_prefix):
+        return None
+    run_id = path_parts[len(expected_prefix)]
+    return run_id if run_id.isdigit() else None
 
 
 def require_review_issue_number(state: State) -> int:

@@ -963,6 +963,12 @@ class CliTest(unittest.TestCase):
                     bucket="fail",
                     link="https://github.com/other/repo/actions/runs/444",
                 ),
+                PullRequestCheck(
+                    name="malformed-run-id",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/555abc",
+                ),
             ],
             status="failure",
         )
