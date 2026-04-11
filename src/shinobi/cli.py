@@ -566,10 +566,20 @@ def handoff_pre_publish_stop(
         return
 
     if stop_decision.conclusion != "needs-human":
-        raise MissionPublishError(
-            "pre-publish stop currently supports only needs-human handoff, got "
-            f"{stop_decision.conclusion}"
+        reason = (
+            "pre-publish stop requested unsupported conclusion "
+            f"{stop_decision.conclusion}; handing off to needs-human instead. "
+            f"Original reason: {stop_decision.reason}"
         )
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason)
 
     handoff_started_mission(
         root=root,

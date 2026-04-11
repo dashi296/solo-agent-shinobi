@@ -980,6 +980,82 @@ class CliTest(unittest.TestCase):
             publish_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
+    def test_run_hands_off_when_pre_publish_stop_requests_unsupported_conclusion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    stop_decision = StopDecision(
+                        reason="Shinobi stopped before publish because auth changes require block.",
+                        conclusion="blocked",
+                        changed_paths=["auth/login.py"],
+                        matched_paths=["auth/"],
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.detect_high_risk_stop",
+                                            return_value=stop_decision,
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.handoff_started_mission"
+                                            ) as handoff_mock:
+                                                with patch(
+                                                    "shinobi.cli.publish_mission",
+                                                ) as publish_mock:
+                                                    with redirect_stdout(output):
+                                                        exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: pre-publish stop requested unsupported conclusion blocked; "
+                "handing off to needs-human instead. Original reason: "
+                "Shinobi stopped before publish because auth changes require block.",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertEqual(
+                handoff_mock.call_args.kwargs["reason"],
+                "pre-publish stop requested unsupported conclusion blocked; "
+                "handing off to needs-human instead. Original reason: "
+                "Shinobi stopped before publish because auth changes require block.",
+            )
+            publish_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
     def test_run_hands_off_when_high_risk_detection_fails_before_publish(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
