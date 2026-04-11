@@ -164,6 +164,8 @@ def parse_pull_request_check(payload: dict[str, Any]) -> PullRequestCheck:
 
 
 def resolve_ci_status(checks: list[PullRequestCheck]) -> str:
+    if not checks:
+        return "pending"
     if any(check.is_failed for check in checks):
         return "failure"
     if any(check.is_pending for check in checks):

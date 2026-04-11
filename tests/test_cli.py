@@ -592,6 +592,7 @@ class CliTest(unittest.TestCase):
 
             saved_state = store.load_state()
             self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
             self.assertEqual(saved_state.last_result, "ci-success")
             self.assertIsNone(saved_state.last_error)
             self.assertEqual(saved_state.extra["ci_status"]["status"], "success")
@@ -648,6 +649,7 @@ class CliTest(unittest.TestCase):
 
             saved_state = store.load_state()
             self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
             self.assertEqual(saved_state.last_result, "ci-timeout")
             self.assertEqual(saved_state.last_error, "CI polling timed out before checks completed")
             self.assertTrue(saved_state.extra["ci_status"]["timed_out"])
@@ -701,6 +703,7 @@ class CliTest(unittest.TestCase):
 
             saved_state = store.load_state()
             self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
             self.assertEqual(saved_state.last_result, "ci-failure")
             self.assertIsNone(saved_state.last_error)
             self.assertEqual(saved_state.extra["ci_status"]["status"], "failure")
@@ -744,9 +747,43 @@ class CliTest(unittest.TestCase):
 
             saved_state = store.load_state()
             self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
             self.assertEqual(saved_state.last_result, "review-error")
             self.assertEqual(saved_state.last_error, "api unavailable")
             self.assertIsNone(store.load_lock())
+
+    def test_review_aborts_when_active_mission_lacks_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id=None,
+                            phase="publish",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: local mission state requires issue_number, pr_number, branch, "
+                "and run_id",
+                output.getvalue(),
+            )
 
     def test_init_preserves_state_agent_identity_when_config_is_recreated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5993,6 +6030,15 @@ class ReviewerTest(unittest.TestCase):
                 timed_out=True,
             ),
         )
+
+    def test_collect_ci_status_treats_missing_checks_as_pending(self) -> None:
+        client = Mock()
+        client.get_ci_status.return_value = []
+
+        status = collect_ci_status(client, 51)
+
+        self.assertEqual(status, CIStatus(checks=[], status="pending"))
+        self.assertTrue(status.is_pending)
 
 
 if __name__ == "__main__":

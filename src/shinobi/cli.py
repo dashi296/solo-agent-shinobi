@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -366,11 +365,14 @@ def command_review(
             f"got {state.phase}"
         )
         return 1
-    if state.issue_number is None or state.pr_number is None or not state.branch:
-        print("review aborted: local mission state requires issue_number, pr_number, and branch")
+    if state.issue_number is None or state.pr_number is None or not state.branch or not state.run_id:
+        print(
+            "review aborted: local mission state requires issue_number, pr_number, branch, "
+            "and run_id"
+        )
         return 1
 
-    run_id = uuid.uuid4().hex
+    run_id = state.run_id
     now = datetime.now(timezone.utc)
     try:
         store.acquire_lock(
