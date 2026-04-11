@@ -876,6 +876,83 @@ class CliTest(unittest.TestCase):
             self.assertEqual(saved_state.last_error, "api unavailable")
             self.assertIsNone(store.load_lock())
 
+    def test_review_persists_last_error_when_completion_comment_update_aborts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: publish\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.update_issue_comment.side_effect = [
+                        None,
+                        GitHubClientError("failed to write review heartbeat comment"),
+                    ]
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.wait_for_ci",
+                            return_value=CIStatus(
+                                checks=[
+                                    PullRequestCheck(
+                                        name="test",
+                                        state="SUCCESS",
+                                        bucket="pass",
+                                    )
+                                ],
+                                status="success",
+                            ),
+                        ):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: failed to upsert review mission-state comment for issue #33: "
+                "failed to write review heartbeat comment",
+                output.getvalue(),
+            )
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.run_id, "publish-run")
+            self.assertEqual(saved_state.last_result, "review-error")
+            self.assertEqual(
+                saved_state.last_error,
+                "failed to upsert review mission-state comment for issue #33: "
+                "failed to write review heartbeat comment",
+            )
+            self.assertIsNone(store.load_lock())
+
     def test_review_aborts_when_active_mission_lacks_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

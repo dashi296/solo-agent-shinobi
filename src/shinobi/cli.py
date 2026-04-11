@@ -482,7 +482,6 @@ def command_review(
         completed_lease_expires_at = store.format_timestamp(
             completed_at + timedelta(minutes=config.mission_lease_minutes)
         )
-        update_review_comment(comment_lease_expires_at=completed_lease_expires_at)
         review_state = State(
             issue_number=state.issue_number,
             pr_number=state.pr_number,
@@ -514,8 +513,14 @@ def command_review(
             },
         )
         try:
+            update_review_comment(comment_lease_expires_at=completed_lease_expires_at)
             store.save_state(review_state)
+        except (ReviewerError, RuntimeError, ValueError) as error:
+            persist_review_error(str(error))
+            print(f"review aborted: {error}")
+            return 1
         except OSError as error:
+            persist_review_error(f"failed to persist CI review result: {error}")
             print(f"review aborted: failed to persist CI review result: {error}")
             return 1
 
