@@ -986,6 +986,42 @@ class CliTest(unittest.TestCase):
                 output.getvalue(),
             )
 
+    def test_review_aborts_when_active_mission_belongs_to_different_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity="other-agent",
+                            run_id="publish-run",
+                            phase="publish",
+                        )
+                    )
+
+                    client = Mock()
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: local mission state belongs to a different agent (other-agent)",
+                output.getvalue(),
+            )
+            client.assert_not_called()
+            self.assertIsNone(store.load_lock())
+
     def test_init_preserves_state_agent_identity_when_config_is_recreated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

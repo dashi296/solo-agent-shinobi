@@ -373,6 +373,12 @@ def command_review(
             "and run_id"
         )
         return 1
+    if state.agent_identity and state.agent_identity != config.agent_identity:
+        print(
+            "review aborted: local mission state belongs to a different agent "
+            f"({state.agent_identity})"
+        )
+        return 1
 
     run_id = state.run_id
     now = datetime.now(timezone.utc)
