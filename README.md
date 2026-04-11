@@ -87,4 +87,4 @@ shinobi run --issue 123
 
 ## 現在の状態
 
-このリポジトリは foundations 実装に加え、`run` の start / publish phase と context builder を持ちます。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示、`run` の issue 選択、stale/live lock 判定、branch 作成、start 用 comment 投稿、GitHub label の start 遷移、検証コマンド実行、branch push、draft PR 作成または更新、publish 用 comment / label / state 更新、Issue 由来の最小 context 構築までを持ちます。context phase の run 統合、review loop、自動 merge はこれから実装します。
+このリポジトリは foundations 実装に加え、`run` の start / publish phase と context builder を持ちます。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示と GitHub 照合、`run` の issue 選択、stale/live lock 判定、branch 作成、start 用 comment 投稿、GitHub label の start 遷移、検証コマンド実行、branch push、draft PR 作成または更新、publish 用 comment / label / state 更新、Issue 由来の最小 context 構築までを持ちます。context phase の run 統合、review loop、自動 merge はこれから実装します。
