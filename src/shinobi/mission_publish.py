@@ -56,13 +56,32 @@ def publish_mission(
     )
 
     client = GitHubClient(root, repo=config.repo)
-    issue_label_names = load_publishable_issue_label_names(
-        client=client,
-        issue_number=issue_number,
-        config=config,
-    )
-
-    push_branch(root, branch)
+    try:
+        issue_label_names = load_publishable_issue_label_names(
+            client=client,
+            issue_number=issue_number,
+            config=config,
+        )
+        push_branch(root, branch)
+    except MissionPublishError as error:
+        raise MissionPublishError(
+            handoff_publish_failure(
+                client=client,
+                store=store,
+                issue_number=issue_number,
+                config=config,
+                branch=branch,
+                lease_expires_at=lease_expires_at,
+                agent_identity=config.agent_identity,
+                run_id=run_id,
+                known_label_names={config.labels["working"]},
+                error=error,
+                reason=(
+                    "Shinobi failed to complete publish phase before creating or "
+                    f"updating a PR for branch {branch}: {error}"
+                ),
+            )
+        ) from error
 
     try:
         pr = create_or_update_pull_request(
@@ -73,39 +92,28 @@ def publish_mission(
             execution_result=execution_result,
         )
     except MissionPublishError as error:
-        rollback_error = transition_publish_failure_to_needs_human(
-            client=client,
-            issue_number=issue_number,
-            config=config,
-            reason=(
-                "Shinobi failed to complete publish phase after pushing branch "
-                f"{branch}: {error}"
-            ),
-            known_label_names=load_handoff_label_names(
+        raise MissionPublishError(
+            handoff_publish_failure(
                 client=client,
-                issue_number=issue_number,
-                fallback_label_names=issue_label_names,
-            ),
-            lease_expires_at=lease_expires_at,
-            agent_identity=config.agent_identity,
-            run_id=run_id,
-            branch=branch,
-        )
-        state_error = None
-        if rollback_error is None:
-            state_error = save_publish_handoff_state(
                 store=store,
                 issue_number=issue_number,
+                config=config,
                 branch=branch,
+                lease_expires_at=lease_expires_at,
                 agent_identity=config.agent_identity,
-                reason=str(error),
+                run_id=run_id,
+                known_label_names=load_handoff_label_names(
+                    client=client,
+                    issue_number=issue_number,
+                    fallback_label_names=issue_label_names,
+                ),
+                error=error,
+                reason=(
+                    "Shinobi failed to complete publish phase after pushing branch "
+                    f"{branch}: {error}"
+                ),
             )
-        message = str(error)
-        if rollback_error is not None:
-            message += f"; failed to hand off publish failure: {rollback_error}"
-        elif state_error is not None:
-            message += f"; failed to persist local publish handoff state: {state_error}"
-        raise MissionPublishError(message) from error
+        ) from error
     pr_number = int(pr["number"])
     pr_url = str(pr.get("url") or "") or None
 
@@ -126,41 +134,29 @@ def publish_mission(
             run_id=run_id,
         )
     except MissionPublishError as error:
-        rollback_error = transition_publish_failure_to_needs_human(
-            client=client,
-            issue_number=issue_number,
-            config=config,
-            reason=(
-                "Shinobi failed to complete publish phase after creating or updating "
-                f"PR #{pr_number}: {error}"
-            ),
-            known_label_names=load_handoff_label_names(
+        raise MissionPublishError(
+            handoff_publish_failure(
                 client=client,
-                issue_number=issue_number,
-                fallback_label_names=issue_label_names,
-            ),
-            lease_expires_at=lease_expires_at,
-            agent_identity=config.agent_identity,
-            run_id=run_id,
-            pr_number=pr_number,
-            branch=branch,
-        )
-        state_error = None
-        if rollback_error is None:
-            state_error = save_publish_handoff_state(
                 store=store,
                 issue_number=issue_number,
-                pr_number=pr_number,
+                config=config,
                 branch=branch,
+                lease_expires_at=lease_expires_at,
                 agent_identity=config.agent_identity,
-                reason=str(error),
+                run_id=run_id,
+                known_label_names=load_handoff_label_names(
+                    client=client,
+                    issue_number=issue_number,
+                    fallback_label_names=issue_label_names,
+                ),
+                error=error,
+                reason=(
+                    "Shinobi failed to complete publish phase after creating or updating "
+                    f"PR #{pr_number}: {error}"
+                ),
+                pr_number=pr_number,
             )
-        message = str(error)
-        if rollback_error is not None:
-            message += f"; failed to hand off publish failure: {rollback_error}"
-        elif state_error is not None:
-            message += f"; failed to persist local publish handoff state: {state_error}"
-        raise MissionPublishError(message) from error
+        ) from error
 
     published_state = State(
         issue_number=issue_number,
@@ -447,6 +443,52 @@ def load_handoff_label_names(
         return get_issue_label_names(client.get_issue(issue_number))
     except GitHubClientError:
         return set(fallback_label_names)
+
+
+def handoff_publish_failure(
+    *,
+    client: GitHubClient,
+    store: StateStore,
+    issue_number: int,
+    config: Config,
+    branch: str,
+    lease_expires_at: str,
+    agent_identity: str,
+    run_id: str,
+    known_label_names: set[str],
+    error: MissionPublishError,
+    reason: str,
+    pr_number: int | None = None,
+) -> str:
+    rollback_error = transition_publish_failure_to_needs_human(
+        client=client,
+        issue_number=issue_number,
+        config=config,
+        reason=reason,
+        known_label_names=known_label_names,
+        lease_expires_at=lease_expires_at,
+        agent_identity=agent_identity,
+        run_id=run_id,
+        pr_number=pr_number,
+        branch=branch,
+    )
+    state_error = None
+    if rollback_error is None:
+        state_error = save_publish_handoff_state(
+            store=store,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            branch=branch,
+            agent_identity=agent_identity,
+            reason=str(error),
+        )
+
+    message = str(error)
+    if rollback_error is not None:
+        message += f"; failed to hand off publish failure: {rollback_error}"
+    elif state_error is not None:
+        message += f"; failed to persist local publish handoff state: {state_error}"
+    return message
 
 
 def save_publish_handoff_state(

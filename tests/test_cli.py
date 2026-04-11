@@ -2508,6 +2508,83 @@ class MissionPublishTest(unittest.TestCase):
         run_mock.assert_not_called()
         client.list_pull_requests_by_head.assert_not_called()
         client.create_pull_request.assert_not_called()
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(31, remove=["shinobi:working"]),
+            ],
+        )
+        client.create_issue_comment.assert_called_once()
+        store.save_state.assert_called_once()
+
+    def test_publish_mission_hands_off_when_push_fails_before_pr_creation(self) -> None:
+        store = Mock()
+        store.format_timestamp.return_value = "2026-04-09T00:30:00Z"
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["git", "push", "-u", "origin", "feature/issue-31-publish-phase"],
+                returncode=1,
+                stdout="",
+                stderr="non-fast-forward",
+            ),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 31,
+                    "labels": [{"name": "shinobi:working"}],
+                }
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "failed to push branch feature/issue-31-publish-phase: non-fast-forward",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        client.list_pull_requests_by_head.assert_not_called()
+        client.create_pull_request.assert_not_called()
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(31, remove=["shinobi:working"]),
+            ],
+        )
+        client.create_issue_comment.assert_called_once()
+        self.assertIn(
+            "failed to complete publish phase before creating or updating a PR",
+            client.create_issue_comment.call_args.args[1],
+        )
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "needs-human")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
 
     def test_publish_mission_rejects_state_from_different_run_before_push(self) -> None:
         store = Mock()
