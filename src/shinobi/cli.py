@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from .config import discover_workspace_root
 from .executor import detect_high_risk_stop, execute_verification
@@ -18,12 +18,14 @@ from .issue_selector import (
     list_open_issues_with_any_label,
     select_ready_issue,
 )
+from .mission_finalize import MissionFinalizeError, finalize_mission
 from .mission_publish import (
     MissionPublishError,
     blocking_verification_results,
     find_blocking_publish_labels,
     load_publishable_issue_label_names,
     publish_mission,
+    push_branch,
     stop_publish_for_blocking_labels,
     upsert_review_comment,
 )
@@ -509,6 +511,33 @@ def command_review(
         completed_lease_expires_at = store.format_timestamp(
             completed_at + timedelta(minutes=config.mission_lease_minutes)
         )
+        if ci_status.is_failed:
+            try:
+                return handle_failed_ci_review(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    state=state,
+                    ci_status=ci_status,
+                    lease_expires_at=completed_lease_expires_at,
+                    update_review_comment=update_review_comment,
+                )
+            except (
+                MissionFinalizeError,
+                MissionPublishError,
+                ReviewerError,
+                RuntimeError,
+                ValueError,
+            ) as error:
+                persist_review_error(str(error))
+                print(f"review aborted: {error}")
+                return 1
+            except OSError as error:
+                persist_review_error(f"failed to persist CI review retry result: {error}")
+                print(f"review aborted: failed to persist CI review retry result: {error}")
+                return 1
+
         review_state = State(
             issue_number=state.issue_number,
             pr_number=state.pr_number,
@@ -565,6 +594,217 @@ def command_review(
         return 1 if ci_status.timed_out or ci_status.is_failed else 0
     finally:
         store.clear_lock(run_id)
+
+
+def handle_failed_ci_review(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    state: State,
+    ci_status: Any,
+    lease_expires_at: str,
+    update_review_comment: Callable[..., None],
+) -> int:
+    issue_number = require_review_issue_number(state)
+    pr_number = require_review_pr_number(state)
+    branch = require_review_branch(state)
+
+    if state.review_loop_count >= config.max_review_loops:
+        reason = (
+            "Shinobi stopped review because CI failed and review loop count "
+            f"{state.review_loop_count} reached max_review_loops {config.max_review_loops}."
+        )
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=build_review_state(
+                state=state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=lease_expires_at,
+                last_result="ci-failure",
+                last_error=reason,
+                ci_status=ci_status,
+            ),
+            conclusion="needs-human",
+            reason=reason,
+        )
+        print(f"review_issue: #{issue_number}")
+        print(f"review_pr: #{pr_number}")
+        print("ci_status: failure")
+        print("review_result: needs-human")
+        print(reason)
+        return 1
+
+    execution_result = execute_verification(root, config)
+    blocking_results = blocking_verification_results(execution_result)
+    if blocking_results:
+        stop_lease_expires_at = store.format_timestamp(
+            datetime.now(timezone.utc) + timedelta(minutes=config.mission_lease_minutes)
+        )
+        rendered_results = ", ".join(
+            f"{command.name}: {command.status}" for command in blocking_results
+        )
+        reason = (
+            "Shinobi stopped review retry because local verification failed "
+            f"after CI failure ({rendered_results})."
+        )
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=build_review_state(
+                state=state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=stop_lease_expires_at,
+                last_result="ci-failure",
+                last_error=reason,
+                ci_status=ci_status,
+                execution_result=execution_result,
+            ),
+            conclusion="needs-human",
+            reason=reason,
+        )
+        print(f"review_issue: #{issue_number}")
+        print(f"review_pr: #{pr_number}")
+        print("ci_status: failure")
+        print("review_result: needs-human")
+        print(reason)
+        return 1
+
+    push_branch(root, branch)
+    retry_count = state.review_loop_count + 1
+    retry_reason = (
+        "CI failed; local verification passed and the branch was pushed for another review pass."
+    )
+    retry_now = datetime.now(timezone.utc)
+    retry_lease_expires_at = store.format_timestamp(
+        retry_now + timedelta(minutes=config.mission_lease_minutes)
+    )
+    store.refresh_lock_heartbeat(
+        run_id=run_id,
+        agent_identity=config.agent_identity,
+        now=retry_now,
+    )
+    update_review_comment(comment_lease_expires_at=retry_lease_expires_at)
+    store.save_state(
+        build_review_state(
+            state=state,
+            config=config,
+            run_id=run_id,
+            phase="review",
+            review_loop_count=retry_count,
+            lease_expires_at=retry_lease_expires_at,
+            last_result="review-retry",
+            last_error=retry_reason,
+            ci_status=ci_status,
+            execution_result=execution_result,
+        )
+    )
+
+    print(f"review_issue: #{issue_number}")
+    print(f"review_pr: #{pr_number}")
+    print("ci_status: failure")
+    print(f"review_loop_count: {retry_count}")
+    print("review_result: retry")
+    print("next_phase: review")
+    return 1
+
+
+def require_review_issue_number(state: State) -> int:
+    if state.issue_number is None:
+        raise ReviewerError("review retry requires issue_number")
+    return state.issue_number
+
+
+def require_review_pr_number(state: State) -> int:
+    if state.pr_number is None:
+        raise ReviewerError("review retry requires pr_number")
+    return state.pr_number
+
+
+def require_review_branch(state: State) -> str:
+    if not state.branch:
+        raise ReviewerError("review retry requires branch")
+    return state.branch
+
+
+def build_review_state(
+    *,
+    state: State,
+    config: Config,
+    run_id: str,
+    phase: str,
+    review_loop_count: int,
+    lease_expires_at: str,
+    last_result: str,
+    last_error: str | None,
+    ci_status: Any,
+    execution_result: ExecutionResult | None = None,
+) -> State:
+    extra: dict[str, Any] = {
+        **state.extra,
+        "ci_status": serialize_ci_status(ci_status),
+    }
+    if execution_result is not None:
+        extra["retry_verification"] = serialize_execution_result(execution_result)
+
+    return State(
+        issue_number=state.issue_number,
+        pr_number=state.pr_number,
+        branch=state.branch,
+        agent_identity=config.agent_identity,
+        run_id=run_id,
+        phase=phase,
+        review_loop_count=review_loop_count,
+        retryable_local_only=False,
+        lease_expires_at=lease_expires_at,
+        last_result=last_result,
+        last_error=last_error,
+        last_mission=state.last_mission,
+        extra=extra,
+    )
+
+
+def serialize_ci_status(ci_status: Any) -> dict[str, Any]:
+    return {
+        "status": ci_status.status,
+        "timed_out": ci_status.timed_out,
+        "checks": [
+            {
+                "name": check.name,
+                "state": check.state,
+                "bucket": check.bucket,
+                "link": check.link,
+            }
+            for check in ci_status.checks
+        ],
+    }
+
+
+def serialize_execution_result(execution_result: ExecutionResult) -> dict[str, Any]:
+    return {
+        "commands": [
+            {
+                "name": command.name,
+                "status": command.status,
+                "returncode": command.returncode,
+                "message": command.message,
+            }
+            for command in execution_result.commands
+        ],
+        "change_summary": execution_result.change_summary,
+    }
 
 
 def render_review_result(ci_status: Any) -> str:
