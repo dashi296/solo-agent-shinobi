@@ -1977,7 +1977,7 @@ class MissionPublishTest(unittest.TestCase):
             client.update_pull_request.assert_called_once()
             client.convert_pull_request_to_draft.assert_not_called()
             client.list_pull_requests_by_head.assert_called_once_with(
-                "owner:feature/issue-31-publish-phase"
+                "feature/issue-31-publish-phase"
             )
             client.create_issue_comment.assert_called_once()
 
@@ -2207,7 +2207,7 @@ class MissionPublishTest(unittest.TestCase):
             client.update_pull_request.assert_called_once()
             client.convert_pull_request_to_draft.assert_called_once_with(44)
             client.list_pull_requests_by_head.assert_called_once_with(
-                "owner:feature/issue-31-publish-phase"
+                "feature/issue-31-publish-phase"
             )
             client.create_issue_comment.assert_called_once()
 
@@ -2297,7 +2297,7 @@ class MissionPublishTest(unittest.TestCase):
             client.convert_pull_request_to_ready.assert_called_once_with(44)
             client.convert_pull_request_to_draft.assert_not_called()
             client.list_pull_requests_by_head.assert_called_once_with(
-                "owner:feature/issue-31-publish-phase"
+                "feature/issue-31-publish-phase"
             )
             client.create_issue_comment.assert_called_once()
 
@@ -2988,10 +2988,10 @@ class MissionPublishTest(unittest.TestCase):
         self.assertEqual(fields["branch"], "feature/issue-31-publish-phase")
         self.assertEqual(fields["phase"], "publish")
 
-    def test_build_same_repo_head_selector_uses_repo_owner(self) -> None:
+    def test_build_same_repo_head_selector_uses_plain_branch_name(self) -> None:
         self.assertEqual(
             build_same_repo_head_selector("owner/repo", "feature/issue-31-publish-phase"),
-            "owner:feature/issue-31-publish-phase",
+            "feature/issue-31-publish-phase",
         )
 
     def test_build_same_repo_head_selector_falls_back_without_owner(self) -> None:

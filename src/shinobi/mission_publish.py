@@ -479,10 +479,7 @@ def create_or_update_pull_request(
 
 
 def build_same_repo_head_selector(repo: str, branch: str) -> str:
-    owner, separator, _ = repo.partition("/")
-    if not separator or not owner:
-        return branch
-    return f"{owner}:{branch}"
+    return branch
 
 
 def render_pr_body(*, issue_number: int, execution_result: ExecutionResult) -> str:
