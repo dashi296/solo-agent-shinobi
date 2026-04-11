@@ -958,6 +958,12 @@ class CliTest(unittest.TestCase):
                     link="https://ci.example.test/check/333",
                 ),
                 PullRequestCheck(
+                    name="same-path-external-host",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://ci.example.test/owner/repo/actions/runs/333",
+                ),
+                PullRequestCheck(
                     name="other-repo",
                     state="FAILURE",
                     bucket="fail",
@@ -5944,6 +5950,24 @@ class GitHubClientTest(unittest.TestCase):
                 client.close_issue(6)
 
         self.assertEqual(run_mock.call_args.args[0][:4], ["gh", "issue", "close", "6"])
+
+    def test_rerun_workflow_run_scopes_command_to_repo(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "run", "rerun", "123456789"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                client.rerun_workflow_run("123456789")
+
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["gh", "run", "rerun", "123456789", "--failed", "--repo", "owner/repo"],
+        )
 
     def test_list_issue_comments_reads_comments_from_issue_view(self) -> None:
         response = subprocess.CompletedProcess(

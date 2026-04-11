@@ -779,6 +779,8 @@ def failed_actions_run_ids(ci_status: Any, *, repo: str) -> list[str]:
 
 def parse_actions_run_id(link: str, *, repo: str) -> str | None:
     parsed = urlparse(link)
+    if parsed.scheme != "https" or parsed.hostname != "github.com":
+        return None
     repo_parts = [part for part in repo.strip("/").split("/") if part]
     path_parts = [part for part in parsed.path.split("/") if part]
     expected_prefix = [*repo_parts, "actions", "runs"]

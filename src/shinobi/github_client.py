@@ -243,7 +243,7 @@ class GitHubClient:
 
     def rerun_workflow_run(self, run_id: str) -> None:
         self._run_gh(
-            ["run", "rerun", run_id, "--failed"],
+            ["run", "rerun", run_id, "--failed", "--repo", self.repo],
             action=f"rerun failed jobs for workflow run {run_id}",
         )
 
