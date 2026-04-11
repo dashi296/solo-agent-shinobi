@@ -354,7 +354,7 @@ max_token_budget: 40000
 
 迷ったら自動マージしません。
 
-high-risk path は context で候補抽出し、execute 完了前に publish 可否を最終判定します。publish 前に確定した場合でも、human handoff に必要な差分があるなら branch を push し、原則 draft PR を作成または更新してから `shinobi:needs-human` か `shinobi:blocked` へ遷移します。この pre-publish stop で PR を作成または更新した場合も、machine-readable な mission-state comment は同じ mission の comment を upsert し、最新の `pr`, `phase`, `lease_expires_at` を反映して recovery と整合させます。差分が無いか共有価値が無い場合だけ PR を作らず停止します。publish 後に review で追加検知した場合は PR を残したまま `shinobi:needs-human` へ遷移します。
+high-risk path は context で候補抽出し、execute 完了後の pre-publish stop で publish 可否を最終判定します。現行実装では publish 前に high-risk path が確定した時点で push / PR 作成前に停止し、start-phase mission を `shinobi:needs-human` へ handoff します。publish 後に review で追加検知した場合は PR を残したまま `shinobi:needs-human` へ遷移します。差分共有のために PR を残したまま handoff する挙動は将来拡張として扱います。
 
 publish 直前に現在の Issue がすでに `shinobi:blocked` または `shinobi:needs-human` を持つ場合は、人手の停止判断を優先し、push / PR 作成前に publish を中止します。
 
@@ -440,7 +440,7 @@ Shinobi Start
 
 開始・recovery 用の Shinobi コメントは、自由文に埋もれた箇条書きではなく、HTML comment marker の中に固定 schema の key-value block を置きます。最低キーは `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `agent_identity`, `run_id` です。自由文本文は人間向けでよいですが、recovery は marker 内の block だけを parse 対象にします。`agent_identity` は `init` が生成する workspace / installation ごとの一意 ID で、複数 runner 間で共有しません。
 
-同じ mission では、この comment を publish / review / recovery のたびに upsert し、marker 内の `phase` `pr` `lease_expires_at` を最新値へ更新します。high-risk path などで publish 前に停止する場合でも、PR を作成または更新したなら同じ comment を upsert して `pr` と停止時の phase を最新化します。stale recovery は最新の machine-readable block と local / PR metadata が整合し、`agent_identity` も現在設定の一意な `agent_identity` と一致する場合だけ行います。publish 前の mission では `pr: null` を許容しますが、その場合は branch 実体と pre-publish phase の整合確認を必須にします。
+同じ mission では、この comment を publish / review / recovery のたびに upsert し、marker 内の `phase` `pr` `lease_expires_at` を最新値へ更新します。現行実装の high-risk path 停止は publish 前 handoff なので、machine-readable な mission-state comment は start phase のまま `pr: null` を維持します。stale recovery は最新の machine-readable block と local / PR metadata が整合し、`agent_identity` も現在設定の一意な `agent_identity` と一致する場合だけ行います。publish 前の mission では `pr: null` を許容しますが、その場合は branch 実体と pre-publish phase の整合確認を必須にします。
 
 レビュー中:
 

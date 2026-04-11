@@ -258,7 +258,6 @@ def publish_mission(
         pr_url=pr_url,
     )
 
-
 def require_publishable_state(
     state: State,
     *,

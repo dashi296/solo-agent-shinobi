@@ -20,7 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from shinobi import cli
 from shinobi.config import discover_repo_slug
 from shinobi.context_builder import build_mission_context
-from shinobi.executor import execute_verification, run_verification_command
+from shinobi.executor import (
+    collect_changed_paths,
+    detect_high_risk_stop,
+    execute_verification,
+    find_high_risk_paths,
+    run_verification_command,
+)
 from shinobi.github_client import GitHubClient, GitHubClientError
 from shinobi.mission_finalize import (
     MissionFinalizeError,
@@ -46,6 +52,7 @@ from shinobi.models import (
     ExecutionResult,
     MissionSummary,
     ReviewDecision,
+    StopDecision,
     State,
     VerificationCommandResult,
 )
@@ -814,15 +821,23 @@ class CliTest(unittest.TestCase):
                                         return_value=execution_result,
                                     ):
                                         with patch(
-                                            "shinobi.cli.publish_mission",
-                                            return_value=Mock(
-                                                pr_number=31,
-                                                pr_url="https://github.com/owner/repo/pull/31",
-                                                lease_expires_at="2026-04-09T00:30:00Z",
-                                            ),
-                                        ) as publish_mock:
-                                            with redirect_stdout(output):
-                                                exit_code = cli.main(["run"])
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:working"},
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.detect_high_risk_stop",
+                                                return_value=None,
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.publish_mission",
+                                                    return_value=Mock(
+                                                        pr_number=31,
+                                                        pr_url="https://github.com/owner/repo/pull/31",
+                                                        lease_expires_at="2026-04-09T00:30:00Z",
+                                                    ),
+                                                ) as publish_mock:
+                                                    with redirect_stdout(output):
+                                                        exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -890,6 +905,392 @@ class CliTest(unittest.TestCase):
             )
             handoff_mock.assert_called_once()
             self.assertIn("test: failed", handoff_mock.call_args.kwargs["reason"])
+            publish_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_hands_off_when_high_risk_paths_are_detected_before_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    published_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        pr_number=31,
+                        pr_url="https://github.com/owner/repo/pull/31",
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    stop_decision = StopDecision(
+                        reason=(
+                            "Shinobi stopped before publish because changed files match "
+                            "high-risk path(s): auth/ (files: auth/login.py)"
+                        ),
+                        conclusion="needs-human",
+                        changed_paths=["auth/login.py"],
+                        matched_paths=["auth/"],
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:working"},
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.detect_high_risk_stop",
+                                                return_value=stop_decision,
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.handoff_started_mission"
+                                                ) as handoff_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: Shinobi stopped before publish because changed files match "
+                "high-risk path(s): auth/ (files: auth/login.py)",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertEqual(
+                handoff_mock.call_args.kwargs["reason"],
+                stop_decision.reason,
+            )
+            publish_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_prefers_existing_blocking_label_before_high_risk_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:blocked", "shinobi:working"},
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.detect_high_risk_stop"
+                                            ) as detect_mock:
+                                                with patch(
+                                                    "shinobi.cli.handoff_started_mission"
+                                                ) as handoff_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: publish phase cannot proceed because issue #6 "
+                "has blocking label(s): shinobi:blocked",
+                output.getvalue(),
+            )
+            detect_mock.assert_not_called()
+            handoff_mock.assert_not_called()
+            publish_mock.assert_not_called()
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "blocked")
+            self.assertEqual(saved_state.last_error, "publish phase cannot proceed because issue #6 has blocking label(s): shinobi:blocked")
+            self.assertIsNotNone(saved_state.last_mission)
+            self.assertEqual(saved_state.last_mission.phase, "publish")
+            self.assertEqual(saved_state.last_mission.conclusion, "blocked")
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_hands_off_when_pre_publish_stop_requests_unsupported_conclusion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    stop_decision = StopDecision(
+                        reason="Shinobi stopped before publish because auth changes require block.",
+                        conclusion="blocked",
+                        changed_paths=["auth/login.py"],
+                        matched_paths=["auth/"],
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:working"},
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.detect_high_risk_stop",
+                                                return_value=stop_decision,
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.handoff_started_mission"
+                                                ) as handoff_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: pre-publish stop requested unsupported conclusion blocked; "
+                "handing off to needs-human instead. Original reason: "
+                "Shinobi stopped before publish because auth changes require block.",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertEqual(
+                handoff_mock.call_args.kwargs["reason"],
+                "pre-publish stop requested unsupported conclusion blocked; "
+                "handing off to needs-human instead. Original reason: "
+                "Shinobi stopped before publish because auth changes require block.",
+            )
+            publish_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_hands_off_when_high_risk_detection_fails_before_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:working"},
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.detect_high_risk_stop",
+                                                side_effect=RuntimeError("unknown revision"),
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.handoff_started_mission"
+                                                ) as handoff_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission"
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: Shinobi failed to evaluate pre-publish stop conditions: "
+                "unknown revision",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertEqual(
+                handoff_mock.call_args.kwargs["reason"],
+                "Shinobi failed to evaluate pre-publish stop conditions: unknown revision",
+            )
+            publish_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_hands_off_when_issue_reload_fails_before_pre_publish_stop_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            side_effect=MissionPublishError(
+                                                "failed to load issue #6 before publish: api unavailable"
+                                            ),
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.handoff_started_mission"
+                                            ) as handoff_mock:
+                                                with patch(
+                                                    "shinobi.cli.detect_high_risk_stop"
+                                                ) as detect_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission"
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: Shinobi failed to evaluate pre-publish stop conditions: "
+                "failed to load issue #6 before publish: api unavailable",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertEqual(
+                handoff_mock.call_args.kwargs["reason"],
+                "Shinobi failed to evaluate pre-publish stop conditions: "
+                "failed to load issue #6 before publish: api unavailable",
+            )
+            detect_mock.assert_not_called()
             publish_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
@@ -4201,6 +4602,360 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in run_mock.call_args_list],
             [["lint-command"], ["typecheck-command"], ["test-command"]],
+        )
+
+    def test_collect_changed_paths_wraps_git_failures(self) -> None:
+        with patch(
+            "shinobi.executor.subprocess.run",
+            return_value=Mock(returncode=1, stdout="", stderr="unknown revision"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "failed to collect changed paths against main: unknown revision",
+            ):
+                collect_changed_paths(Path("/tmp/repo"), base_ref="main")
+
+    def test_collect_changed_paths_prefers_origin_main_before_local_main(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="M\tauth/login.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses) as run_mock:
+            changed = collect_changed_paths(Path("/tmp/repo"), base_ref="main")
+
+        self.assertEqual(changed, ["auth/login.py"])
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            ["git", "diff", "--name-status", "--diff-filter=ACMRD", "origin/main...HEAD"],
+        )
+
+    def test_collect_changed_paths_falls_back_to_local_main_when_origin_main_is_missing(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=1,
+                stdout="",
+                stderr="unknown revision",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="M\tauth/login.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses) as run_mock:
+            changed = collect_changed_paths(Path("/tmp/repo"), base_ref="main")
+
+        self.assertEqual(changed, ["auth/login.py"])
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            ["git", "diff", "--name-status", "--diff-filter=ACMRD", "origin/main...HEAD"],
+        )
+        self.assertEqual(
+            run_mock.call_args_list[1].args[0],
+            ["git", "diff", "--name-status", "--diff-filter=ACMRD", "main...HEAD"],
+        )
+
+    def test_collect_changed_paths_includes_deleted_staged_unstaged_and_untracked_files(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="M\tsrc/app.py\nD\tauth/deleted.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="M\tauth/staged.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="M\tauth/working_tree.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="auth/new_file.py\n",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            changed = collect_changed_paths(Path("/tmp/repo"), base_ref="main")
+
+        self.assertEqual(
+            changed,
+            [
+                "auth/deleted.py",
+                "auth/new_file.py",
+                "auth/staged.py",
+                "auth/working_tree.py",
+                "src/app.py",
+            ],
+        )
+
+    def test_collect_changed_paths_includes_both_paths_for_renames_and_copies(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="R100\tauth/legacy.py\tsrc/legacy.py\nC100\tbilling/base.py\tbilling/copied.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            changed = collect_changed_paths(Path("/tmp/repo"), base_ref="main")
+
+        self.assertEqual(
+            changed,
+            [
+                "auth/legacy.py",
+                "billing/base.py",
+                "billing/copied.py",
+                "src/legacy.py",
+            ],
+        )
+
+    def test_find_high_risk_paths_matches_directory_prefixes(self) -> None:
+        matched = find_high_risk_paths(
+            changed_paths=["src/app.py", "auth/login.py", "billing/invoice.py"],
+            high_risk_paths=["auth/", "billing/", "infra/"],
+        )
+
+        self.assertEqual(matched, ["auth/", "billing/"])
+
+    def test_find_high_risk_paths_preserves_dot_prefixed_paths(self) -> None:
+        matched = find_high_risk_paths(
+            changed_paths=[".github/workflows/release.yml", "src/app.py"],
+            high_risk_paths=[".github/", "auth/"],
+        )
+
+        self.assertEqual(matched, [".github/"])
+
+    def test_detect_high_risk_stop_returns_structured_decision(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["git", "diff"],
+            returncode=0,
+            stdout="M\tsrc/app.py\nM\tauth/login.py\n",
+            stderr="",
+        )
+
+        with patch("shinobi.executor.subprocess.run", return_value=response):
+            decision = detect_high_risk_stop(
+                Path("/tmp/repo"),
+                Config(repo="owner/repo", high_risk_paths=["auth/", "billing/"]),
+            )
+
+        self.assertEqual(
+            decision,
+            StopDecision(
+                reason=(
+                    "Shinobi stopped before publish because changed files match "
+                    "high-risk path(s): auth/ (files: auth/login.py)"
+                ),
+                conclusion="needs-human",
+                retryable=False,
+                changed_paths=["auth/login.py"],
+                matched_paths=["auth/"],
+            ),
+        )
+
+    def test_detect_high_risk_stop_returns_none_for_safe_paths(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="M\tsrc/app.py\nM\ttests/test_cli.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            decision = detect_high_risk_stop(
+                Path("/tmp/repo"),
+                Config(repo="owner/repo", high_risk_paths=["auth/", "billing/"]),
+            )
+
+        self.assertIsNone(decision)
+
+    def test_detect_high_risk_stop_detects_deleted_and_untracked_high_risk_paths(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="M\tsrc/app.py\nD\tauth/deleted.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="auth/new_file.py\n",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            decision = detect_high_risk_stop(
+                Path("/tmp/repo"),
+                Config(repo="owner/repo", high_risk_paths=["auth/", "billing/"]),
+            )
+
+        self.assertEqual(
+            decision,
+            StopDecision(
+                reason=(
+                    "Shinobi stopped before publish because changed files match "
+                    "high-risk path(s): auth/ (files: auth/deleted.py, auth/new_file.py)"
+                ),
+                conclusion="needs-human",
+                retryable=False,
+                changed_paths=["auth/deleted.py", "auth/new_file.py"],
+                matched_paths=["auth/"],
+            ),
+        )
+
+    def test_detect_high_risk_stop_detects_renamed_paths_moved_out_of_high_risk_directory(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="R100\tauth/login.py\tsrc/login.py\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff", "--cached"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "diff"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["git", "ls-files"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            decision = detect_high_risk_stop(
+                Path("/tmp/repo"),
+                Config(repo="owner/repo", high_risk_paths=["auth/", "billing/"]),
+            )
+
+        self.assertEqual(
+            decision,
+            StopDecision(
+                reason=(
+                    "Shinobi stopped before publish because changed files match "
+                    "high-risk path(s): auth/ (files: auth/login.py)"
+                ),
+                conclusion="needs-human",
+                retryable=False,
+                changed_paths=["auth/login.py"],
+                matched_paths=["auth/"],
+            ),
         )
 
     def test_config_preserves_custom_verification_commands(self) -> None:

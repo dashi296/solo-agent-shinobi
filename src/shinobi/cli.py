@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from .config import discover_workspace_root
-from .executor import execute_verification
+from .executor import detect_high_risk_stop, execute_verification
 from .github_client import GitHubClient, GitHubClientError
 from .issue_selector import (
     ensure_open_issue,
@@ -21,7 +21,10 @@ from .issue_selector import (
 from .mission_publish import (
     MissionPublishError,
     blocking_verification_results,
+    find_blocking_publish_labels,
+    load_publishable_issue_label_names,
     publish_mission,
+    stop_publish_for_blocking_labels,
 )
 from .mission_start import (
     MissionStartError,
@@ -29,7 +32,7 @@ from .mission_start import (
     handoff_started_mission,
     start_mission,
 )
-from .models import Config, ExecutionResult, State
+from .models import Config, ExecutionResult, State, StopDecision
 from .state_store import StateStore
 
 
@@ -429,6 +432,21 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 started_mission=started_mission,
                 execution_result=execution_result,
             )
+            stop_decision = detect_pre_publish_stop(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+            )
+            handoff_pre_publish_stop(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+                stop_decision=stop_decision,
+            )
             published_mission = publish_mission(
                 root=root,
                 store=store,
@@ -513,6 +531,100 @@ def handoff_failed_verification(
         reason=reason,
     )
     raise MissionPublishError(reason)
+
+
+def detect_pre_publish_stop(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+) -> StopDecision | None:
+    client = GitHubClient(root, repo=config.repo)
+    try:
+        issue_label_names = load_publishable_issue_label_names(
+            client=client,
+            issue_number=started_mission.issue_number,
+        )
+    except MissionPublishError as error:
+        reason = f"Shinobi failed to evaluate pre-publish stop conditions: {error}"
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason) from error
+
+    blocking_labels = find_blocking_publish_labels(
+        label_names=issue_label_names,
+        config=config,
+    )
+    if blocking_labels:
+        stop_publish_for_blocking_labels(
+            store=store,
+            issue_number=started_mission.issue_number,
+            branch=started_mission.branch,
+            agent_identity=config.agent_identity,
+            blocking_labels=blocking_labels,
+            blocked_label=config.labels["blocked"],
+        )
+
+    try:
+        return detect_high_risk_stop(root, config)
+    except RuntimeError as error:
+        reason = f"Shinobi failed to evaluate pre-publish stop conditions: {error}"
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason) from error
+
+
+def handoff_pre_publish_stop(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+    stop_decision: StopDecision | None,
+) -> None:
+    if stop_decision is None:
+        return
+
+    if stop_decision.conclusion != "needs-human":
+        reason = (
+            "pre-publish stop requested unsupported conclusion "
+            f"{stop_decision.conclusion}; handing off to needs-human instead. "
+            f"Original reason: {stop_decision.reason}"
+        )
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason)
+
+    handoff_started_mission(
+        root=root,
+        store=store,
+        config=config,
+        run_id=run_id,
+        started_mission=started_mission,
+        reason=stop_decision.reason,
+    )
+    raise MissionPublishError(stop_decision.reason)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
