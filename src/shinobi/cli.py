@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -33,9 +34,10 @@ from .mission_start import (
     MissionStartError,
     StartedMission,
     handoff_started_mission,
+    resume_local_only_mission,
     start_mission,
 )
-from .models import Config, ExecutionResult, State, StopDecision
+from .models import Config, ExecutionResult, MissionSummary, State, StopDecision
 from .reviewer import ReviewerError, wait_for_ci
 from .state_store import StateStore
 
@@ -935,10 +937,23 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
             print(f"run aborted: failed to load local state: {state_error}")
             return 1
 
-        conflict = detect_local_mission_conflict(state=state, requested_issue=issue_number)
-        if conflict is not None:
-            print(f"run aborted: {conflict}")
+        local_only_issue, local_only_error = recover_local_only_mission_candidate(
+            root=root,
+            store=store,
+            config=config,
+            state=state,
+            requested_issue=issue_number,
+        )
+        if local_only_error is not None:
+            print(f"run aborted: {local_only_error}")
             return 1
+
+        state = store.load_state()
+        if local_only_issue is None:
+            conflict = detect_local_mission_conflict(state=state, requested_issue=issue_number)
+            if conflict is not None:
+                print(f"run aborted: {conflict}")
+                return 1
 
         try:
             active_issue_numbers = list_open_issues_with_any_label(
@@ -953,7 +968,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
             print(f"run aborted: {error}")
             return 1
 
-        selected_issue = issue_number
+        selected_issue = local_only_issue if local_only_issue is not None else issue_number
         if selected_issue is None:
             if active_issue_numbers:
                 rendered = ", ".join(f"#{number}" for number in active_issue_numbers)
@@ -994,14 +1009,25 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
 
         try:
             issue = load_issue(root, selected_issue, repo=config.repo)
-            started_mission = start_mission(
-                root=root,
-                store=store,
-                config=config,
-                run_id=run_id,
-                issue=issue,
-                now=now,
-            )
+            if local_only_issue is not None:
+                started_mission = resume_local_only_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    issue=issue,
+                    state=store.load_state(),
+                    now=now,
+                )
+            else:
+                started_mission = start_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    issue=issue,
+                    now=now,
+                )
             execution_result = execute_verification(root, config)
             handoff_failed_verification(
                 root=root,
@@ -1079,6 +1105,126 @@ def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int
         )
 
     return None
+
+
+def recover_local_only_mission_candidate(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    state: State,
+    requested_issue: Optional[int],
+) -> tuple[int | None, str | None]:
+    if not state.retryable_local_only:
+        return None, None
+
+    issue_number = state.issue_number
+    if issue_number is None:
+        clear_retryable_local_only_state(
+            store=store,
+            state=state,
+            conclusion="aborted",
+            error="retryable local-only mission is missing issue_number",
+        )
+        return None, "retryable local-only mission exists but local state is missing issue_number"
+
+    if requested_issue is not None and requested_issue != issue_number:
+        return None, f"retryable local-only mission exists for issue #{issue_number}"
+
+    recovery_error = validate_retryable_local_only_state(
+        root=root,
+        store=store,
+        config=config,
+        state=state,
+    )
+    if recovery_error is not None:
+        clear_retryable_local_only_state(
+            store=store,
+            state=state,
+            conclusion="aborted",
+            error=recovery_error,
+        )
+        return None, (
+            f"retryable local-only mission for issue #{issue_number} could not be resumed: "
+            f"{recovery_error}"
+        )
+
+    return issue_number, None
+
+
+def validate_retryable_local_only_state(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    state: State,
+) -> str | None:
+    if state.phase != "start":
+        return f"phase must be start, got {state.phase}"
+    if not state.branch:
+        return "branch is missing"
+    if not state.run_id:
+        return "run_id is missing"
+    if not state.agent_identity:
+        return "agent_identity is missing"
+    if state.agent_identity != config.agent_identity:
+        return (
+            "agent_identity does not match current workspace "
+            f"({state.agent_identity} != {config.agent_identity})"
+        )
+    if not git_local_branch_exists(root, state.branch):
+        return f"branch {state.branch} does not exist locally"
+    if not store.has_retryable_start_failure(
+        issue_number=state.issue_number,
+        branch=state.branch,
+        phase=state.phase,
+        agent_identity=state.agent_identity,
+        run_id=state.run_id,
+    ):
+        return "retryable start failure record is missing"
+    return None
+
+
+def clear_retryable_local_only_state(
+    *,
+    store: StateStore,
+    state: State,
+    conclusion: str,
+    error: str,
+) -> None:
+    store.save_state(
+        State(
+            issue_number=None,
+            pr_number=None,
+            branch=None,
+            agent_identity=state.agent_identity,
+            run_id=None,
+            phase="idle",
+            review_loop_count=0,
+            retryable_local_only=False,
+            lease_expires_at=None,
+            last_result=conclusion,
+            last_error=error,
+            last_mission=MissionSummary(
+                issue_number=state.issue_number,
+                pr_number=state.pr_number,
+                branch=state.branch,
+                phase=state.phase,
+                conclusion=conclusion,
+            ),
+        )
+    )
+
+
+def git_local_branch_exists(root: Path, branch: str) -> bool:
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
 
 
 def handoff_failed_verification(

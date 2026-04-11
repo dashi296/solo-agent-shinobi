@@ -199,6 +199,112 @@ def handoff_started_mission(
     )
 
 
+def resume_local_only_mission(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    issue: dict,
+    state: State,
+    now: datetime | None = None,
+) -> StartedMission:
+    started_at = now or datetime.now(timezone.utc)
+    issue_number = require_startable_issue(issue, config)
+    if state.issue_number != issue_number:
+        raise MissionStartError(
+            "retryable local-only state issue does not match requested issue "
+            f"(state: {state.issue_number}, issue: {issue_number})"
+        )
+    if not state.branch:
+        raise MissionStartError(
+            f"retryable local-only mission for issue #{issue_number} is missing branch"
+        )
+
+    store.require_lock_owner(run_id, config.agent_identity)
+    lease_expires_at = store.format_timestamp(
+        started_at + timedelta(minutes=config.mission_lease_minutes)
+    )
+    issue_label_names = get_issue_label_names(issue)
+
+    try:
+        sync_start_labels(root, issue_number, config, issue_label_names=issue_label_names)
+    except MissionStartError as error:
+        state.last_error = str(error)
+        save_retryable_state_or_raise(
+            store=store,
+            state=state,
+            base_message=str(error),
+        )
+        raise error
+
+    try:
+        post_start_comment(
+            root=root,
+            issue_number=issue_number,
+            branch=state.branch,
+            lease_expires_at=lease_expires_at,
+            config=config,
+            run_id=run_id,
+        )
+    except MissionStartError as error:
+        state.last_error = str(error)
+        save_retryable_state_or_raise(
+            store=store,
+            state=state,
+            base_message=str(error),
+        )
+        raise error
+
+    active_state = State(
+        issue_number=issue_number,
+        pr_number=None,
+        branch=state.branch,
+        agent_identity=config.agent_identity,
+        run_id=run_id,
+        phase="start",
+        review_loop_count=0,
+        retryable_local_only=False,
+        lease_expires_at=lease_expires_at,
+        last_result="started",
+        last_error=None,
+    )
+    try:
+        store.save_state(active_state)
+    except OSError as error:
+        rollback_error = transition_issue_to_needs_human(
+            root=root,
+            issue_number=issue_number,
+            config=config,
+            reason=(
+                "Shinobi failed to persist final local state while resuming a local-only "
+                f"mission after updating active labels: {error}"
+            ),
+            known_label_names={config.labels["working"]},
+        )
+        state.last_error = (
+            "GitHub labels were updated but final local state persistence failed while "
+            f"resuming local-only mission: {error}"
+        )
+        if rollback_error is not None:
+            state.last_error += f"; rollback also failed: {rollback_error}"
+        failure_message = format_final_state_persistence_failure(
+            issue_number, error, rollback_error
+        )
+        save_retryable_state_or_raise(
+            store=store,
+            state=state,
+            base_message=failure_message,
+        )
+        raise MissionStartError(failure_message) from error
+
+    return StartedMission(
+        issue_number=issue_number,
+        branch=state.branch,
+        lease_expires_at=lease_expires_at,
+    )
+
+
 def build_branch_name(*, issue_number: int, issue_title: str) -> str:
     slug = slugify_issue_title(issue_title)
     return f"feature/issue-{issue_number}-{slug}"

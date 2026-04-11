@@ -44,6 +44,7 @@ from shinobi.mission_start import (
     MissionStartError,
     StartedMission,
     handoff_started_mission,
+    resume_local_only_mission,
     start_mission,
 )
 from shinobi.models import (
@@ -2265,7 +2266,7 @@ class CliTest(unittest.TestCase):
             issue_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
-    def test_run_with_issue_refuses_same_issue_when_retryable_local_only_mission_exists(self) -> None:
+    def test_run_with_issue_resumes_same_retryable_local_only_mission(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
@@ -2277,21 +2278,84 @@ class CliTest(unittest.TestCase):
                     state = store.load_state()
                     state.issue_number = 6
                     state.phase = "start"
+                    state.branch = "feature/issue-6-run-start-phase"
+                    state.run_id = "previous-run"
                     state.retryable_local_only = True
                     store.save_state(state)
+                    (store.paths.logs_dir / "retryable-start-failures.jsonl").write_text(
+                        json.dumps(
+                            {
+                                "issue_number": 6,
+                                "branch": state.branch,
+                                "phase": "start",
+                                "agent_identity": state.agent_identity,
+                                "run_id": "previous-run",
+                                "retryable_local_only": True,
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
 
                     output = io.StringIO()
                     with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
-                        with patch("shinobi.cli.ensure_open_issue", return_value=6) as issue_mock:
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["run", "--issue", "6"])
+                        with patch("shinobi.cli.ensure_open_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.git_local_branch_exists",
+                                return_value=True,
+                            ):
+                                with patch(
+                                    "shinobi.cli.load_issue",
+                                    return_value={
+                                        "number": 6,
+                                        "title": "Run start phase",
+                                        "state": "OPEN",
+                                        "labels": [{"name": "shinobi:ready"}],
+                                    },
+                                ):
+                                    with patch(
+                                        "shinobi.cli.resume_local_only_mission",
+                                        return_value=Mock(
+                                            branch="feature/issue-6-run-start-phase",
+                                            issue_number=6,
+                                            lease_expires_at="2026-04-09T00:30:00Z",
+                                        ),
+                                    ) as resume_mock:
+                                        with patch("shinobi.cli.start_mission") as start_mock:
+                                            execution_result = Mock()
+                                            execution_result.succeeded = True
+                                            execution_result.commands = []
+                                            with patch(
+                                                "shinobi.cli.execute_verification",
+                                                return_value=execution_result,
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.load_publishable_issue_label_names",
+                                                    return_value={"shinobi:working"},
+                                                ):
+                                                    with patch(
+                                                        "shinobi.cli.detect_high_risk_stop",
+                                                        return_value=None,
+                                                    ):
+                                                        with patch(
+                                                            "shinobi.cli.publish_mission",
+                                                            return_value=Mock(
+                                                                pr_number=31,
+                                                                pr_url=None,
+                                                                lease_expires_at=(
+                                                                    "2026-04-09T00:30:00Z"
+                                                                ),
+                                                            ),
+                                                        ):
+                                                            with redirect_stdout(output):
+                                                                exit_code = cli.main(
+                                                                    ["run", "--issue", "6"]
+                                                                )
 
-            self.assertEqual(exit_code, 1)
-            self.assertIn(
-                "run aborted: retryable local-only mission exists for issue #6",
-                output.getvalue(),
-            )
-            issue_mock.assert_not_called()
+            self.assertEqual(exit_code, 0)
+            self.assertIn("selected_issue: 6", output.getvalue())
+            resume_mock.assert_called_once()
+            start_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_with_issue_refuses_same_issue_when_github_mission_is_active(self) -> None:
@@ -2485,6 +2549,51 @@ class CliTest(unittest.TestCase):
                 "run aborted: retryable local-only mission exists but local state is missing issue_number",
                 output.getvalue(),
             )
+            repaired_state = store.load_state()
+            self.assertEqual(repaired_state.phase, "idle")
+            self.assertFalse(repaired_state.retryable_local_only)
+            self.assertEqual(repaired_state.last_result, "aborted")
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_cleans_up_retryable_local_only_state_without_retry_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    state = store.load_state()
+                    state.issue_number = 6
+                    state.phase = "start"
+                    state.branch = "feature/issue-6-run-start-phase"
+                    state.run_id = "previous-run"
+                    state.retryable_local_only = True
+                    store.save_state(state)
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.git_local_branch_exists", return_value=True):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: retryable local-only mission for issue #6 could not be resumed: "
+                "retryable start failure record is missing",
+                output.getvalue(),
+            )
+            repaired_state = store.load_state()
+            self.assertEqual(repaired_state.phase, "idle")
+            self.assertFalse(repaired_state.retryable_local_only)
+            self.assertEqual(repaired_state.last_result, "aborted")
+            self.assertEqual(repaired_state.last_mission, MissionSummary(
+                issue_number=6,
+                pr_number=None,
+                branch="feature/issue-6-run-start-phase",
+                phase="start",
+                conclusion="aborted",
+            ))
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_select_ready_issue_prefers_high_priority_labels(self) -> None:
@@ -3193,6 +3302,87 @@ class MissionStartTest(unittest.TestCase):
             self.assertEqual(payload["phase"], "start")
             self.assertTrue(payload["retryable_local_only"])
             self.assertIn("disk full", payload["last_error"])
+
+    def test_resume_local_only_mission_completes_start_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                config, _ = store.initialize()
+
+            run_id = "run-456"
+            now = datetime(2026, 4, 11, 0, 0, tzinfo=timezone.utc)
+            store.save_lock(store.acquire_lock(config=config, run_id=run_id, pid=123, now=now)[0])
+            retryable_state = State(
+                issue_number=40,
+                pr_number=None,
+                branch="feature/issue-40-recover-local-only-mission",
+                agent_identity=config.agent_identity,
+                run_id="run-123",
+                phase="start",
+                review_loop_count=0,
+                retryable_local_only=True,
+                lease_expires_at=None,
+                last_result="start_pending",
+                last_error="persist failed once",
+            )
+            store.save_state(retryable_state)
+            (store.paths.logs_dir / "retryable-start-failures.jsonl").write_text(
+                json.dumps(
+                    {
+                        "started_at": "2026-04-10T23:59:00Z",
+                        "issue_number": 40,
+                        "branch": retryable_state.branch,
+                        "phase": "start",
+                        "agent_identity": config.agent_identity,
+                        "run_id": "run-123",
+                        "retryable_local_only": True,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_client = FakeGitHubClient(
+                issue_number=40,
+                title="[TASK] recover local-only mission を実装する",
+                labels=[config.labels["ready"]],
+            )
+
+            with patch("shinobi.mission_start.GitHubClient", return_value=fake_client):
+                started = resume_local_only_mission(
+                    root=root,
+                    store=store,
+                    config=config,
+                    run_id=run_id,
+                    issue={
+                        "number": 40,
+                        "title": "[TASK] recover local-only mission を実装する",
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["ready"]}],
+                    },
+                    state=retryable_state,
+                    now=now,
+                )
+
+            self.assertEqual(started.issue_number, 40)
+            self.assertEqual(started.branch, "feature/issue-40-recover-local-only-mission")
+            self.assertEqual(fake_client.issue_labels, {config.labels["working"]})
+            self.assertEqual(
+                fake_client.label_operations,
+                [
+                    ("add", 40, (config.labels["working"],)),
+                    ("remove", 40, (config.labels["ready"],)),
+                ],
+            )
+            self.assertEqual(len(fake_client.comments), 1)
+            self.assertIn("Shinobi Start", str(fake_client.comments[0]["body"]))
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "start")
+            self.assertFalse(saved_state.retryable_local_only)
+            self.assertEqual(saved_state.run_id, run_id)
+            self.assertEqual(saved_state.branch, retryable_state.branch)
+            self.assertEqual(saved_state.last_result, "started")
+            self.assertIsNone(saved_state.last_error)
 
     def test_start_mission_normalizes_all_non_risky_state_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

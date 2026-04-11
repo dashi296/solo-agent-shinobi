@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Tuple
 
 try:
     import fcntl
@@ -283,6 +283,42 @@ class StateStore:
 
     def has_state(self) -> bool:
         return self.paths.config_path.exists() or self.paths.state_path.exists()
+
+    def has_retryable_start_failure(
+        self,
+        *,
+        issue_number: int,
+        branch: str,
+        phase: str,
+        agent_identity: str,
+        run_id: str,
+    ) -> bool:
+        return any(
+            entry.get("retryable_local_only") is True
+            and entry.get("issue_number") == issue_number
+            and entry.get("branch") == branch
+            and entry.get("phase") == phase
+            and entry.get("agent_identity") == agent_identity
+            and entry.get("run_id") == run_id
+            for entry in self.load_retryable_start_failures()
+        )
+
+    def load_retryable_start_failures(self) -> list[dict[str, Any]]:
+        log_path = self.paths.logs_dir / "retryable-start-failures.jsonl"
+        if not log_path.exists():
+            return []
+
+        entries: list[dict[str, Any]] = []
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                entries.append(payload)
+        return entries
 
     def try_load_lock(self) -> Tuple[RunLock | None, str | None]:
         try:
