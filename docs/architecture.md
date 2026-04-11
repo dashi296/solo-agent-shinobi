@@ -93,6 +93,7 @@ src/shinobi/
   github_client.py
   issue_selector.py
   context_builder.py
+  mission_finalize.py
   executor.py
   mission_publish.py
   reviewer.py
@@ -108,6 +109,7 @@ src/shinobi/
 - `github_client.py`: GitHub API 操作
 - `issue_selector.py`: 次 Issue 選択
 - `context_builder.py`: 最小コンテキスト生成
+- `mission_finalize.py`: 終端 comment、label 正規化、Issue close、final state 保存、lock 解放
 - `executor.py`: 実装フェーズの検証コマンド実行と結果構造化
 - `mission_publish.py`: branch push、draft PR 作成または更新、publish 状態の label / comment / state 更新
 - `reviewer.py`: review / retry 判定
@@ -136,6 +138,16 @@ publish phase は start 済み mission を draft PR として公開します。
 - `shinobi:reviewing` を付与し、`shinobi:risky` 以外の状態 label を正規化する
 - start 時の mission-state comment を `phase: publish` と最新 `pr` / `lease_expires_at` へ upsert する
 - `.shinobi/state.json` を `phase: publish`、`last_result: published` に更新する
+
+### `mission_finalize.py`
+
+finalize phase は publish 後または停止後の mission を終端状態へ正規化します。
+
+- `merged` / `blocked` / `needs-human` のいずれか 1 つへ label を正規化する
+- 完了または停止コメントを Issue に投稿する
+- `merged` の場合だけ Issue を close する
+- `.shinobi/state.json` を idle と直近 mission summary に更新する
+- owner run に限って `.shinobi/run.lock` を解放する
 
 ## 実装優先順位
 

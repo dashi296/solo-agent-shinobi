@@ -81,6 +81,12 @@ class GitHubClient:
             action=f"create comment on issue #{issue_number}",
         )
 
+    def close_issue(self, issue_number: int) -> None:
+        self._run_gh(
+            ["issue", "close", str(issue_number)],
+            action=f"close issue #{issue_number}",
+        )
+
     def list_issue_comments(self, issue_number: int, *, per_page: int = 100) -> list[dict[str, Any]]:
         page = 1
         comments: list[dict[str, Any]] = []
