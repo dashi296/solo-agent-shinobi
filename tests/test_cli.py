@@ -24,6 +24,7 @@ from shinobi.executor import execute_verification, run_verification_command
 from shinobi.github_client import GitHubClient, GitHubClientError
 from shinobi.mission_publish import (
     MissionPublishError,
+    build_same_repo_head_selector,
     find_mission_state_comment,
     parse_mission_state_fields,
     publish_mission,
@@ -1973,6 +1974,9 @@ class MissionPublishTest(unittest.TestCase):
             client.create_pull_request.assert_not_called()
             client.update_pull_request.assert_called_once()
             client.convert_pull_request_to_draft.assert_not_called()
+            client.list_pull_requests_by_head.assert_called_once_with(
+                "owner:feature/issue-31-publish-phase"
+            )
             client.create_issue_comment.assert_called_once()
 
     def test_publish_mission_converts_existing_pr_back_to_draft(self) -> None:
@@ -2051,6 +2055,9 @@ class MissionPublishTest(unittest.TestCase):
             client.create_pull_request.assert_not_called()
             client.update_pull_request.assert_called_once()
             client.convert_pull_request_to_draft.assert_called_once_with(44)
+            client.list_pull_requests_by_head.assert_called_once_with(
+                "owner:feature/issue-31-publish-phase"
+            )
             client.create_issue_comment.assert_called_once()
 
     def test_publish_mission_hands_off_when_publish_label_cleanup_fails(self) -> None:
@@ -2613,6 +2620,18 @@ class MissionPublishTest(unittest.TestCase):
         self.assertEqual(fields["issue"], "31")
         self.assertEqual(fields["branch"], "feature/issue-31-publish-phase")
         self.assertEqual(fields["phase"], "publish")
+
+    def test_build_same_repo_head_selector_uses_repo_owner(self) -> None:
+        self.assertEqual(
+            build_same_repo_head_selector("owner/repo", "feature/issue-31-publish-phase"),
+            "owner:feature/issue-31-publish-phase",
+        )
+
+    def test_build_same_repo_head_selector_falls_back_without_owner(self) -> None:
+        self.assertEqual(
+            build_same_repo_head_selector("owner-repo", "feature/issue-31-publish-phase"),
+            "feature/issue-31-publish-phase",
+        )
 
 
 class ContextBuilderTest(unittest.TestCase):

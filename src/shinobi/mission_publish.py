@@ -337,8 +337,9 @@ def create_or_update_pull_request(
 ) -> dict[str, Any]:
     title = f"#{issue_number} Publish mission changes"
     body = render_pr_body(issue_number=issue_number, execution_result=execution_result)
+    head_selector = build_same_repo_head_selector(config.repo, branch)
     try:
-        existing_prs = client.list_pull_requests_by_head(branch)
+        existing_prs = client.list_pull_requests_by_head(head_selector)
     except GitHubClientError as error:
         raise MissionPublishError(
             f"failed to look up existing PR for issue #{issue_number}: {error}"
@@ -381,6 +382,13 @@ def create_or_update_pull_request(
             ) from error
 
     return updated_pr
+
+
+def build_same_repo_head_selector(repo: str, branch: str) -> str:
+    owner, separator, _ = repo.partition("/")
+    if not separator or not owner:
+        return branch
+    return f"{owner}:{branch}"
 
 
 def render_pr_body(*, issue_number: int, execution_result: ExecutionResult) -> str:
