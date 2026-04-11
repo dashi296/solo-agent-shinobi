@@ -25,7 +25,6 @@ from .mission_publish import (
     find_blocking_publish_labels,
     load_publishable_issue_label_names,
     publish_mission,
-    push_branch,
     stop_publish_for_blocking_labels,
     upsert_review_comment,
 )
@@ -517,6 +516,7 @@ def command_review(
                     root=root,
                     store=store,
                     config=config,
+                    client=client,
                     run_id=run_id,
                     state=state,
                     ci_status=ci_status,
@@ -601,6 +601,7 @@ def handle_failed_ci_review(
     root: Path,
     store: StateStore,
     config: Config,
+    client: GitHubClient,
     run_id: str,
     state: State,
     ci_status: Any,
@@ -682,10 +683,49 @@ def handle_failed_ci_review(
         print(reason)
         return 1
 
-    push_branch(root, branch)
+    retry_run_ids = failed_actions_run_ids(ci_status)
+    if not retry_run_ids:
+        stop_lease_expires_at = store.format_timestamp(
+            datetime.now(timezone.utc) + timedelta(minutes=config.mission_lease_minutes)
+        )
+        reason = (
+            "Shinobi stopped review retry because local verification passed after CI failure, "
+            "but no rerunnable GitHub Actions workflow run was found."
+        )
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=build_review_state(
+                state=state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=stop_lease_expires_at,
+                last_result="ci-failure",
+                last_error=reason,
+                ci_status=ci_status,
+                execution_result=execution_result,
+            ),
+            conclusion="needs-human",
+            reason=reason,
+        )
+        print(f"review_issue: #{issue_number}")
+        print(f"review_pr: #{pr_number}")
+        print("ci_status: failure")
+        print("review_result: needs-human")
+        print(reason)
+        return 1
+
+    for retry_run_id in retry_run_ids:
+        client.rerun_workflow_run(retry_run_id)
+
     retry_count = state.review_loop_count + 1
     retry_reason = (
-        "CI failed; local verification passed and the branch was pushed for another review pass."
+        "CI failed; local verification passed and failed GitHub Actions workflow "
+        f"run(s) were rerun: {', '.join(retry_run_ids)}."
     )
     retry_now = datetime.now(timezone.utc)
     retry_lease_expires_at = store.format_timestamp(
@@ -709,6 +749,7 @@ def handle_failed_ci_review(
             last_error=retry_reason,
             ci_status=ci_status,
             execution_result=execution_result,
+            retry_run_ids=retry_run_ids,
         )
     )
 
@@ -719,6 +760,34 @@ def handle_failed_ci_review(
     print("review_result: retry")
     print("next_phase: review")
     return 1
+
+
+def failed_actions_run_ids(ci_status: Any) -> list[str]:
+    run_ids: list[str] = []
+    seen: set[str] = set()
+    for check in ci_status.checks:
+        if check.bucket not in {"fail", "cancel"} or not check.link:
+            continue
+        run_id = parse_actions_run_id(check.link)
+        if run_id is None or run_id in seen:
+            continue
+        seen.add(run_id)
+        run_ids.append(run_id)
+    return run_ids
+
+
+def parse_actions_run_id(link: str) -> str | None:
+    marker = "/actions/runs/"
+    marker_index = link.find(marker)
+    if marker_index == -1:
+        return None
+    suffix = link[marker_index + len(marker):]
+    run_id = ""
+    for character in suffix:
+        if not character.isdigit():
+            break
+        run_id += character
+    return run_id or None
 
 
 def require_review_issue_number(state: State) -> int:
@@ -751,6 +820,7 @@ def build_review_state(
     last_error: str | None,
     ci_status: Any,
     execution_result: ExecutionResult | None = None,
+    retry_run_ids: list[str] | None = None,
 ) -> State:
     extra: dict[str, Any] = {
         **state.extra,
@@ -758,6 +828,8 @@ def build_review_state(
     }
     if execution_result is not None:
         extra["retry_verification"] = serialize_execution_result(execution_result)
+    if retry_run_ids is not None:
+        extra["retry_workflow_run_ids"] = retry_run_ids
 
     return State(
         issue_number=state.issue_number,

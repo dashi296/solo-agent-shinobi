@@ -809,6 +809,7 @@ class CliTest(unittest.TestCase):
                                         name="test",
                                         state="FAILURE",
                                         bucket="fail",
+                                        link="https://github.com/owner/repo/actions/runs/123456789/job/987",
                                     )
                                 ],
                                 status="failure",
@@ -818,9 +819,8 @@ class CliTest(unittest.TestCase):
                                 "shinobi.cli.execute_verification",
                                 return_value=execution_result,
                             ) as execute_verification_mock:
-                                with patch("shinobi.cli.push_branch") as push_branch_mock:
-                                    with redirect_stdout(output):
-                                        exit_code = cli.main(["review"])
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -829,7 +829,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("review_result: retry", rendered)
             self.assertIn("next_phase: review", rendered)
             execute_verification_mock.assert_called_once()
-            push_branch_mock.assert_called_once_with(root, "feature/issue-33-review-ci")
+            client.rerun_workflow_run.assert_called_once_with("123456789")
 
             saved_state = store.load_state()
             self.assertEqual(saved_state.phase, "review")
@@ -838,11 +838,13 @@ class CliTest(unittest.TestCase):
             self.assertEqual(saved_state.last_result, "review-retry")
             self.assertEqual(
                 saved_state.last_error,
-                "CI failed; local verification passed and the branch was pushed for another review pass.",
+                "CI failed; local verification passed and failed GitHub Actions workflow "
+                "run(s) were rerun: 123456789.",
             )
             self.assertEqual(saved_state.extra["ci_status"]["status"], "failure")
             self.assertFalse(saved_state.extra["ci_status"]["timed_out"])
             self.assertEqual(saved_state.extra["retry_verification"]["commands"][0]["status"], "passed")
+            self.assertEqual(saved_state.extra["retry_workflow_run_ids"], ["123456789"])
             self.assertIsNone(store.load_lock())
 
     def test_review_failed_ci_finalizes_needs_human_when_loop_limit_reached(self) -> None:
@@ -928,6 +930,39 @@ class CliTest(unittest.TestCase):
             self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
             self.assertIsNone(store.load_lock())
 
+    def test_failed_actions_run_ids_extracts_unique_failed_action_runs(self) -> None:
+        status = CIStatus(
+            checks=[
+                PullRequestCheck(
+                    name="test",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/123456789/job/987",
+                ),
+                PullRequestCheck(
+                    name="lint",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://github.com/owner/repo/actions/runs/123456789",
+                ),
+                PullRequestCheck(
+                    name="docs",
+                    state="SUCCESS",
+                    bucket="pass",
+                    link="https://github.com/owner/repo/actions/runs/222",
+                ),
+                PullRequestCheck(
+                    name="external",
+                    state="FAILURE",
+                    bucket="fail",
+                    link="https://ci.example.test/check/333",
+                ),
+            ],
+            status="failure",
+        )
+
+        self.assertEqual(cli.failed_actions_run_ids(status), ["123456789"])
+
     def test_review_failed_ci_finalizes_needs_human_when_retry_verification_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -1005,16 +1040,15 @@ class CliTest(unittest.TestCase):
                                     "shinobi.cli.execute_verification",
                                     return_value=execution_result,
                                 ) as execute_verification_mock:
-                                    with patch("shinobi.cli.push_branch") as push_branch_mock:
-                                        with redirect_stdout(output):
-                                            exit_code = cli.main(["review"])
+                                    with redirect_stdout(output):
+                                        exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
             self.assertIn("review_result: needs-human", rendered)
             self.assertIn("local verification failed", rendered)
             execute_verification_mock.assert_called_once()
-            push_branch_mock.assert_not_called()
+            client.rerun_workflow_run.assert_not_called()
             client.update_issue_labels.assert_any_call(
                 33,
                 add=[config.labels["needs_human"]],
