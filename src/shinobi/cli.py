@@ -21,7 +21,10 @@ from .issue_selector import (
 from .mission_publish import (
     MissionPublishError,
     blocking_verification_results,
+    find_blocking_publish_labels,
+    load_publishable_issue_label_names,
     publish_mission,
+    stop_publish_for_blocking_labels,
 )
 from .mission_start import (
     MissionStartError,
@@ -538,8 +541,28 @@ def detect_pre_publish_stop(
     run_id: str,
     started_mission: StartedMission,
 ) -> StopDecision | None:
+    client = GitHubClient(root, repo=config.repo)
     try:
+        issue_label_names = load_publishable_issue_label_names(
+            client=client,
+            issue_number=started_mission.issue_number,
+        )
+        blocking_labels = find_blocking_publish_labels(
+            label_names=issue_label_names,
+            config=config,
+        )
+        if blocking_labels:
+            stop_publish_for_blocking_labels(
+                store=store,
+                issue_number=started_mission.issue_number,
+                branch=started_mission.branch,
+                agent_identity=config.agent_identity,
+                blocking_labels=blocking_labels,
+                blocked_label=config.labels["blocked"],
+            )
         return detect_high_risk_stop(root, config)
+    except MissionPublishError:
+        raise
     except RuntimeError as error:
         reason = f"Shinobi failed to evaluate pre-publish stop conditions: {error}"
         handoff_started_mission(

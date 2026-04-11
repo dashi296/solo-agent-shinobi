@@ -821,19 +821,23 @@ class CliTest(unittest.TestCase):
                                         return_value=execution_result,
                                     ):
                                         with patch(
-                                            "shinobi.cli.detect_high_risk_stop",
-                                            return_value=None,
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:working"},
                                         ):
                                             with patch(
-                                                "shinobi.cli.publish_mission",
-                                                return_value=Mock(
-                                                    pr_number=31,
-                                                    pr_url="https://github.com/owner/repo/pull/31",
-                                                    lease_expires_at="2026-04-09T00:30:00Z",
-                                                ),
-                                            ) as publish_mock:
-                                                with redirect_stdout(output):
-                                                    exit_code = cli.main(["run"])
+                                                "shinobi.cli.detect_high_risk_stop",
+                                                return_value=None,
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.publish_mission",
+                                                    return_value=Mock(
+                                                        pr_number=31,
+                                                        pr_url="https://github.com/owner/repo/pull/31",
+                                                        lease_expires_at="2026-04-09T00:30:00Z",
+                                                    ),
+                                                ) as publish_mock:
+                                                    with redirect_stdout(output):
+                                                        exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -961,17 +965,21 @@ class CliTest(unittest.TestCase):
                                         return_value=execution_result,
                                     ):
                                         with patch(
-                                            "shinobi.cli.detect_high_risk_stop",
-                                            return_value=stop_decision,
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:working"},
                                         ):
                                             with patch(
-                                                "shinobi.cli.handoff_started_mission"
-                                            ) as handoff_mock:
+                                                "shinobi.cli.detect_high_risk_stop",
+                                                return_value=stop_decision,
+                                            ):
                                                 with patch(
-                                                    "shinobi.cli.publish_mission",
-                                                ) as publish_mock:
-                                                    with redirect_stdout(output):
-                                                        exit_code = cli.main(["run"])
+                                                    "shinobi.cli.handoff_started_mission"
+                                                ) as handoff_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
@@ -985,6 +993,80 @@ class CliTest(unittest.TestCase):
                 stop_decision.reason,
             )
             publish_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_prefers_existing_blocking_label_before_high_risk_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:blocked", "shinobi:working"},
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.detect_high_risk_stop"
+                                            ) as detect_mock:
+                                                with patch(
+                                                    "shinobi.cli.handoff_started_mission"
+                                                ) as handoff_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: publish phase cannot proceed because issue #6 "
+                "has blocking label(s): shinobi:blocked",
+                output.getvalue(),
+            )
+            detect_mock.assert_not_called()
+            handoff_mock.assert_not_called()
+            publish_mock.assert_not_called()
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "blocked")
+            self.assertEqual(saved_state.last_error, "publish phase cannot proceed because issue #6 has blocking label(s): shinobi:blocked")
+            self.assertIsNotNone(saved_state.last_mission)
+            self.assertEqual(saved_state.last_mission.phase, "publish")
+            self.assertEqual(saved_state.last_mission.conclusion, "blocked")
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_hands_off_when_pre_publish_stop_requests_unsupported_conclusion(self) -> None:
@@ -1034,17 +1116,21 @@ class CliTest(unittest.TestCase):
                                         return_value=execution_result,
                                     ):
                                         with patch(
-                                            "shinobi.cli.detect_high_risk_stop",
-                                            return_value=stop_decision,
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:working"},
                                         ):
                                             with patch(
-                                                "shinobi.cli.handoff_started_mission"
-                                            ) as handoff_mock:
+                                                "shinobi.cli.detect_high_risk_stop",
+                                                return_value=stop_decision,
+                                            ):
                                                 with patch(
-                                                    "shinobi.cli.publish_mission",
-                                                ) as publish_mock:
-                                                    with redirect_stdout(output):
-                                                        exit_code = cli.main(["run"])
+                                                    "shinobi.cli.handoff_started_mission"
+                                                ) as handoff_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
@@ -1104,17 +1190,21 @@ class CliTest(unittest.TestCase):
                                         return_value=execution_result,
                                     ):
                                         with patch(
-                                            "shinobi.cli.detect_high_risk_stop",
-                                            side_effect=RuntimeError("unknown revision"),
+                                            "shinobi.cli.load_publishable_issue_label_names",
+                                            return_value={"shinobi:working"},
                                         ):
                                             with patch(
-                                                "shinobi.cli.handoff_started_mission"
-                                            ) as handoff_mock:
+                                                "shinobi.cli.detect_high_risk_stop",
+                                                side_effect=RuntimeError("unknown revision"),
+                                            ):
                                                 with patch(
-                                                    "shinobi.cli.publish_mission"
-                                                ) as publish_mock:
-                                                    with redirect_stdout(output):
-                                                        exit_code = cli.main(["run"])
+                                                    "shinobi.cli.handoff_started_mission"
+                                                ) as handoff_mock:
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission"
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
