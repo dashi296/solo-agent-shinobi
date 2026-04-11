@@ -94,6 +94,7 @@ src/shinobi/
   issue_selector.py
   context_builder.py
   executor.py
+  mission_publish.py
   reviewer.py
   merger.py
   state_store.py
@@ -108,6 +109,7 @@ src/shinobi/
 - `issue_selector.py`: 次 Issue 選択
 - `context_builder.py`: 最小コンテキスト生成
 - `executor.py`: 実装フェーズの検証コマンド実行と結果構造化
+- `mission_publish.py`: branch push、draft PR 作成または更新、publish 状態の label / comment / state 更新
 - `reviewer.py`: review / retry 判定
 - `merger.py`: マージ可否判定
 - `state_store.py`: ローカル state 管理
@@ -121,6 +123,19 @@ MVP の executor は、コード編集 agent の呼び出しではなく verific
 - 未定義コマンドは `not_configured` として失敗結果に含める
 - コマンド起動失敗は例外で phase 全体を落とさず `error` 結果として返す
 - 後続の publish / review phase が使えるよう `ExecutionResult` に成功可否と変更要約の土台を持たせる
+
+### `mission_publish.py`
+
+publish phase は start 済み mission を draft PR として公開します。
+
+- owner run の lock を確認してから publish する
+- 検証結果に `failed` または `error` が含まれる場合は push / PR 更新前に停止し、`needs-human` へ handoff する
+- 現在の Issue label に `shinobi:blocked` または `shinobi:needs-human` があれば push / PR 更新前に停止する
+- active branch を `origin` へ push する
+- branch に対応する既存 PR があれば更新し、なければ draft PR を作成する
+- `shinobi:reviewing` を付与し、`shinobi:risky` 以外の状態 label を正規化する
+- start 時の mission-state comment を `phase: publish` と最新 `pr` / `lease_expires_at` へ upsert する
+- `.shinobi/state.json` を `phase: publish`、`last_result: published` に更新する
 
 ## 実装優先順位
 

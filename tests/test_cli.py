@@ -22,13 +22,20 @@ from shinobi.config import discover_repo_slug
 from shinobi.context_builder import build_mission_context
 from shinobi.executor import execute_verification, run_verification_command
 from shinobi.github_client import GitHubClient, GitHubClientError
+from shinobi.mission_publish import (
+    MissionPublishError,
+    build_same_repo_head_selector,
+    find_mission_state_comment,
+    parse_mission_state_fields,
+    publish_mission,
+)
 from shinobi.mission_start import (
     MissionStartError,
     StartedMission,
     handoff_started_mission,
     start_mission,
 )
-from shinobi.models import Config
+from shinobi.models import Config, ExecutionResult, VerificationCommandResult
 from shinobi.state_store import StateStore
 
 
@@ -448,16 +455,91 @@ class CliTest(unittest.TestCase):
                                         lease_expires_at="2026-04-09T00:30:00Z",
                                     ),
                                 ):
-                                    with patch("shinobi.cli.handoff_started_mission"):
-                                        with redirect_stdout(output):
-                                            exit_code = cli.main(["run"])
+                                    execution_result = Mock()
+                                    execution_result.succeeded = True
+                                    execution_result.commands = []
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.publish_mission",
+                                            return_value=Mock(
+                                                pr_number=31,
+                                                pr_url="https://github.com/owner/repo/pull/31",
+                                                lease_expires_at="2026-04-09T00:30:00Z",
+                                            ),
+                                        ) as publish_mock:
+                                            with redirect_stdout(output):
+                                                exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
             self.assertIn("run lock: took over stale lock during select phase", rendered)
             self.assertIn("selected_issue: 6", rendered)
             self.assertIn("started_branch: feature/issue-6-run-start-phase", rendered)
-            self.assertIn("next_phase: manual-handoff", rendered)
+            self.assertIn("published_pr: #31", rendered)
+            self.assertIn("next_phase: review", rendered)
+            self.assertNotIn("now", publish_mock.call_args.kwargs)
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_hands_off_when_verification_fails_before_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="failed",
+                                returncode=1,
+                            )
+                        ],
+                        change_summary="No automated code changes are performed.",
+                    )
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    return_value=started_mission,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.handoff_started_mission"
+                                        ) as handoff_mock:
+                                            with patch(
+                                                "shinobi.cli.publish_mission"
+                                            ) as publish_mock:
+                                                with redirect_stdout(output):
+                                                    exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: Shinobi stopped before publish because verification failed",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertIn("test: failed", handoff_mock.call_args.kwargs["reason"])
+            publish_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_refuses_active_github_mission_before_selecting_ready_issue(self) -> None:
@@ -1716,6 +1798,1209 @@ class MissionStartTest(unittest.TestCase):
                 )
 
 
+class MissionPublishTest(unittest.TestCase):
+    def test_publish_mission_pushes_branch_creates_pr_updates_labels_comment_and_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+            store = StateStore(root)
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            run_id = "run-123"
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            lock_started_at = datetime(2026, 4, 8, 23, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id=run_id, pid=123, now=lock_started_at)
+            store.save_state(
+                cli.State(
+                    issue_number=31,
+                    pr_number=None,
+                    branch="feature/issue-31-publish-phase",
+                    agent_identity=config.agent_identity,
+                    run_id=run_id,
+                    phase="start",
+                    retryable_local_only=False,
+                    lease_expires_at="2026-04-09T00:30:00Z",
+                    last_result="started",
+                )
+            )
+            execution_result = Mock()
+            execution_result.change_summary = "Published mission changes."
+            execution_result.commands = []
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["git", "push", "-u", "origin", "feature/issue-31-publish-phase"],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.list_pull_requests_by_head.return_value = []
+                    client.create_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                    }
+                    client.get_issue.return_value = {
+                        "number": 31,
+                        "labels": [
+                            {"name": "shinobi:ready"},
+                            {"name": "shinobi:working"},
+                            {"name": "shinobi:risky"},
+                        ],
+                    }
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 31\n"
+                                "branch: feature/issue-31-publish-phase\n"
+                                "phase: start\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+
+                    published = publish_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id=run_id,
+                        state=store.load_state(),
+                        execution_result=execution_result,
+                        now=now,
+                    )
+
+            self.assertEqual(published.pr_number, 44)
+            self.assertEqual(published.lease_expires_at, "2026-04-09T00:30:00Z")
+            client.create_pull_request.assert_called_once()
+            self.assertTrue(client.create_pull_request.call_args.kwargs["draft"])
+            self.assertEqual(
+                client.update_issue_labels.call_args_list,
+                [
+                    unittest.mock.call(31, add=["shinobi:reviewing"]),
+                    unittest.mock.call(
+                        31,
+                        remove=["shinobi:ready", "shinobi:working"],
+                    ),
+                ],
+            )
+            client.update_issue_comment.assert_called_once()
+            self.assertIn("phase: publish", client.update_issue_comment.call_args.args[1])
+            self.assertIn("pr: 44", client.update_issue_comment.call_args.args[1])
+            state = store.load_state()
+            self.assertEqual(state.phase, "publish")
+            self.assertEqual(state.pr_number, 44)
+            self.assertEqual(state.last_result, "published")
+            lock = store.load_lock()
+            self.assertIsNotNone(lock)
+            self.assertEqual(lock.heartbeat_at, "2026-04-09T00:00:00Z")
+
+    def test_publish_mission_updates_existing_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps({"repo": "owner/repo", "agent_identity": "agent-1"}),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "agent-1", "phase": "idle"}),
+                encoding="utf-8",
+            )
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id="run-123", pid=123, now=now)
+            state = cli.State(
+                issue_number=31,
+                branch="feature/issue-31-publish-phase",
+                agent_identity="agent-1",
+                run_id="run-123",
+                phase="start",
+            )
+            execution_result = Mock()
+            execution_result.change_summary = "Published mission changes."
+            execution_result.commands = []
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.list_pull_requests_by_head.return_value = [
+                        {
+                            "number": 44,
+                            "url": "https://github.com/owner/repo/pull/44",
+                            "isDraft": True,
+                            "headRefName": "feature/issue-31-publish-phase",
+                            "baseRefName": "main",
+                        }
+                    ]
+                    client.update_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": True,
+                    }
+                    client.get_issue.side_effect = [
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:working"}],
+                        },
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:reviewing"}],
+                        },
+                    ]
+                    client.list_issue_comments.return_value = []
+
+                    publish_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                        now=now,
+                    )
+
+            client.create_pull_request.assert_not_called()
+            client.update_pull_request.assert_called_once()
+            client.convert_pull_request_to_draft.assert_not_called()
+            client.list_pull_requests_by_head.assert_called_once_with(
+                "feature/issue-31-publish-phase"
+            )
+            client.create_issue_comment.assert_called_once()
+
+    def test_publish_mission_creates_new_pr_when_existing_head_targets_other_base(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps({"repo": "owner/repo", "agent_identity": "agent-1"}),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "agent-1", "phase": "idle"}),
+                encoding="utf-8",
+            )
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id="run-123", pid=123, now=now)
+            state = cli.State(
+                issue_number=31,
+                branch="feature/issue-31-publish-phase",
+                agent_identity="agent-1",
+                run_id="run-123",
+                phase="start",
+            )
+            execution_result = Mock()
+            execution_result.change_summary = "Published mission changes."
+            execution_result.commands = []
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.list_pull_requests_by_head.return_value = [
+                        {
+                            "number": 44,
+                            "url": "https://github.com/owner/repo/pull/44",
+                            "isDraft": True,
+                            "headRefName": "feature/issue-31-publish-phase",
+                            "baseRefName": "release/1.0",
+                        }
+                    ]
+                    client.create_pull_request.return_value = {
+                        "number": 45,
+                        "url": "https://github.com/owner/repo/pull/45",
+                    }
+                    client.get_issue.side_effect = [
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:working"}],
+                        },
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:reviewing"}],
+                        },
+                    ]
+                    client.list_issue_comments.return_value = []
+
+                    publish_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                        now=now,
+                    )
+
+            client.update_pull_request.assert_not_called()
+            client.create_pull_request.assert_called_once()
+            self.assertEqual(client.create_pull_request.call_args.kwargs["base"], "main")
+
+    def test_publish_mission_hands_off_when_multiple_open_prs_match_same_base(self) -> None:
+        store = Mock()
+        store.format_timestamp.return_value = "2026-04-09T00:30:00Z"
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.side_effect = [
+                    {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    },
+                    {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    },
+                ]
+                client.list_pull_requests_by_head.return_value = [
+                    {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": True,
+                        "headRefName": "feature/issue-31-publish-phase",
+                        "baseRefName": "main",
+                    },
+                    {
+                        "number": 45,
+                        "url": "https://github.com/owner/repo/pull/45",
+                        "isDraft": True,
+                        "headRefName": "feature/issue-31-publish-phase",
+                        "baseRefName": "main",
+                    },
+                ]
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "multiple open PRs match feature/issue-31-publish-phase -> main",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        client.update_pull_request.assert_not_called()
+        client.create_pull_request.assert_not_called()
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(31, remove=["shinobi:working"]),
+            ],
+        )
+        client.create_issue_comment.assert_called_once()
+        store.save_state.assert_called_once()
+
+    def test_publish_mission_converts_existing_pr_back_to_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps({"repo": "owner/repo", "agent_identity": "agent-1"}),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "agent-1", "phase": "idle"}),
+                encoding="utf-8",
+            )
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id="run-123", pid=123, now=now)
+            state = cli.State(
+                issue_number=31,
+                branch="feature/issue-31-publish-phase",
+                agent_identity="agent-1",
+                run_id="run-123",
+                phase="start",
+            )
+            execution_result = Mock()
+            execution_result.change_summary = "Published mission changes."
+            execution_result.commands = []
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.list_pull_requests_by_head.return_value = [
+                        {
+                            "number": 44,
+                            "url": "https://github.com/owner/repo/pull/44",
+                            "isDraft": False,
+                            "headRefName": "feature/issue-31-publish-phase",
+                            "baseRefName": "main",
+                        }
+                    ]
+                    client.update_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": False,
+                    }
+                    client.convert_pull_request_to_draft.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": True,
+                    }
+                    client.get_issue.side_effect = [
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:working"}],
+                        },
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:reviewing"}],
+                        },
+                    ]
+                    client.list_issue_comments.return_value = []
+
+                    publish_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                        now=now,
+                    )
+
+            client.create_pull_request.assert_not_called()
+            client.update_pull_request.assert_called_once()
+            client.convert_pull_request_to_draft.assert_called_once_with(44)
+            client.list_pull_requests_by_head.assert_called_once_with(
+                "feature/issue-31-publish-phase"
+            )
+            client.create_issue_comment.assert_called_once()
+
+    def test_publish_mission_marks_existing_draft_pr_ready_when_config_disables_drafts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps(
+                    {
+                        "repo": "owner/repo",
+                        "agent_identity": "agent-1",
+                        "use_draft_pr": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "agent-1", "phase": "idle"}),
+                encoding="utf-8",
+            )
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id="run-123", pid=123, now=now)
+            state = cli.State(
+                issue_number=31,
+                branch="feature/issue-31-publish-phase",
+                agent_identity="agent-1",
+                run_id="run-123",
+                phase="start",
+            )
+            execution_result = Mock()
+            execution_result.change_summary = "Published mission changes."
+            execution_result.commands = []
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.list_pull_requests_by_head.return_value = [
+                        {
+                            "number": 44,
+                            "url": "https://github.com/owner/repo/pull/44",
+                            "isDraft": True,
+                            "headRefName": "feature/issue-31-publish-phase",
+                            "baseRefName": "main",
+                        }
+                    ]
+                    client.update_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": True,
+                    }
+                    client.convert_pull_request_to_ready.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                        "isDraft": False,
+                    }
+                    client.get_issue.side_effect = [
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:working"}],
+                        },
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:reviewing"}],
+                        },
+                    ]
+                    client.list_issue_comments.return_value = []
+
+                    publish_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                        now=now,
+                    )
+
+            client.create_pull_request.assert_not_called()
+            client.update_pull_request.assert_called_once()
+            client.convert_pull_request_to_ready.assert_called_once_with(44)
+            client.convert_pull_request_to_draft.assert_not_called()
+            client.list_pull_requests_by_head.assert_called_once_with(
+                "feature/issue-31-publish-phase"
+            )
+            client.create_issue_comment.assert_called_once()
+
+    def test_publish_mission_hands_off_when_publish_label_cleanup_fails(self) -> None:
+        store = Mock()
+        store.format_timestamp.return_value = "2026-04-09T00:30:00Z"
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.side_effect = [
+                    {
+                        "number": 31,
+                        "labels": [
+                            {"name": "shinobi:ready"},
+                            {"name": "shinobi:working"},
+                        ],
+                    },
+                    {
+                        "number": 31,
+                        "labels": [
+                            {"name": "shinobi:ready"},
+                            {"name": "shinobi:working"},
+                            {"name": "shinobi:reviewing"},
+                        ],
+                    },
+                ]
+                client.list_pull_requests_by_head.return_value = []
+                client.create_pull_request.return_value = {
+                    "number": 44,
+                    "url": "https://github.com/owner/repo/pull/44",
+                }
+                client.update_issue_labels.side_effect = [
+                    None,
+                    GitHubClientError("remove failed"),
+                    None,
+                    None,
+                ]
+                client.list_issue_comments.return_value = [
+                    {
+                        "id": 9001,
+                        "body": (
+                            "<!-- shinobi:mission-state\n"
+                            "issue: 31\n"
+                            "branch: feature/issue-31-publish-phase\n"
+                            "phase: start\n"
+                            "-->\n"
+                        ),
+                    }
+                ]
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "failed to normalize publish labels for issue #31",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:reviewing"]),
+                unittest.mock.call(31, remove=["shinobi:ready", "shinobi:working"]),
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(
+                    31,
+                    remove=["shinobi:ready", "shinobi:reviewing", "shinobi:working"],
+                ),
+            ],
+        )
+        client.update_issue_comment.assert_called_once()
+        self.assertIn(
+            "failed to complete publish phase",
+            client.update_issue_comment.call_args.args[1],
+        )
+        self.assertIn("phase: publish", client.update_issue_comment.call_args.args[1])
+        self.assertIn("pr: 44", client.update_issue_comment.call_args.args[1])
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "needs-human")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertEqual(saved_state.last_mission.pr_number, 44)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+
+    def test_publish_mission_hands_off_when_final_state_save_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.config_path.write_text(
+                json.dumps({"repo": "owner/repo", "agent_identity": "agent-1"}),
+                encoding="utf-8",
+            )
+            store.paths.state_path.write_text(
+                json.dumps({"agent_identity": "agent-1", "phase": "idle"}),
+                encoding="utf-8",
+            )
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id="run-123", pid=123, now=now)
+            state = cli.State(
+                issue_number=31,
+                branch="feature/issue-31-publish-phase",
+                agent_identity="agent-1",
+                run_id="run-123",
+                phase="start",
+            )
+            execution_result = ExecutionResult(
+                commands=[],
+                change_summary="Published mission changes.",
+            )
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.get_issue.side_effect = [
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:working"}],
+                        },
+                        {
+                            "number": 31,
+                            "labels": [{"name": "shinobi:reviewing"}],
+                        },
+                    ]
+                    client.list_pull_requests_by_head.return_value = []
+                    client.create_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                    }
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 31\n"
+                                "branch: feature/issue-31-publish-phase\n"
+                                "phase: start\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    with patch.object(store, "save_state", side_effect=OSError("disk full")):
+                        with self.assertRaisesRegex(
+                            MissionPublishError,
+                            "final local state persistence failed for issue #31: disk full",
+                        ):
+                            publish_mission(
+                                root=root,
+                                store=store,
+                                config=config,
+                                run_id="run-123",
+                                state=state,
+                                execution_result=execution_result,
+                                now=now,
+                            )
+
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:reviewing"]),
+                unittest.mock.call(31, remove=["shinobi:working"]),
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(31, remove=["shinobi:reviewing"]),
+            ],
+        )
+        self.assertEqual(client.create_issue_comment.call_count, 0)
+        self.assertEqual(client.update_issue_comment.call_count, 2)
+        self.assertIn(
+            "failed to persist final local state during publish phase",
+            client.update_issue_comment.call_args_list[-1].args[1],
+        )
+
+    def test_publish_mission_still_comments_when_handoff_label_cleanup_fails(self) -> None:
+        store = Mock()
+        store.format_timestamp.return_value = "2026-04-09T00:30:00Z"
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.side_effect = [
+                    {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    },
+                    {
+                        "number": 31,
+                        "labels": [
+                            {"name": "shinobi:working"},
+                            {"name": "shinobi:reviewing"},
+                        ],
+                    },
+                ]
+                client.list_pull_requests_by_head.return_value = []
+                client.create_pull_request.return_value = {
+                    "number": 44,
+                    "url": "https://github.com/owner/repo/pull/44",
+                }
+                client.update_issue_labels.side_effect = [
+                    None,
+                    None,
+                    None,
+                    GitHubClientError("remove failed"),
+                ]
+                client.list_issue_comments.side_effect = GitHubClientError("comments failed")
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "failed to hand off publish failure: remove failed; failed to upsert publish failure comment for issue #31: comments failed",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        client.create_issue_comment.assert_not_called()
+        client.update_issue_comment.assert_not_called()
+        store.save_state.assert_not_called()
+
+    def test_publish_mission_rejects_non_start_state(self) -> None:
+        with self.assertRaisesRegex(
+            MissionPublishError,
+            "publish phase requires local state phase start",
+        ):
+            publish_mission(
+                root=Path("/tmp/repo"),
+                store=Mock(),
+                config=Config(repo="owner/repo", agent_identity="agent-1"),
+                run_id="run-123",
+                state=cli.State(issue_number=31, branch="feature/issue-31", phase="idle"),
+                execution_result=Mock(),
+            )
+
+    def test_publish_mission_rejects_failed_verification_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[
+                VerificationCommandResult(
+                    name="lint",
+                    command=[],
+                    status="not_configured",
+                ),
+                VerificationCommandResult(
+                    name="test",
+                    command=["python3", "-m", "unittest"],
+                    status="failed",
+                    returncode=1,
+                ),
+            ],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with self.assertRaisesRegex(
+                MissionPublishError,
+                "test: failed",
+            ):
+                publish_mission(
+                    root=Path("/tmp/repo"),
+                    store=store,
+                    config=config,
+                    run_id="run-123",
+                    state=state,
+                    execution_result=execution_result,
+                )
+
+        run_mock.assert_not_called()
+        store.require_lock_owner.assert_not_called()
+
+    def test_publish_mission_rejects_blocking_issue_label_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 31,
+                    "labels": [{"name": "shinobi:needs-human"}],
+                }
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "has blocking label\\(s\\): shinobi:needs-human",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        run_mock.assert_not_called()
+        client.list_pull_requests_by_head.assert_not_called()
+        client.create_pull_request.assert_not_called()
+        client.update_issue_labels.assert_not_called()
+        client.create_issue_comment.assert_not_called()
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "needs-human")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+
+    def test_publish_mission_preserves_blocked_label_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 31,
+                    "labels": [{"name": "shinobi:blocked"}],
+                }
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "has blocking label\\(s\\): shinobi:blocked",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        run_mock.assert_not_called()
+        client.update_issue_labels.assert_not_called()
+        client.create_issue_comment.assert_not_called()
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "blocked")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "blocked")
+
+    def test_publish_mission_hands_off_when_push_fails_before_pr_creation(self) -> None:
+        store = Mock()
+        store.format_timestamp.return_value = "2026-04-09T00:30:00Z"
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["git", "push", "-u", "origin", "feature/issue-31-publish-phase"],
+                returncode=1,
+                stdout="",
+                stderr="non-fast-forward",
+            ),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.return_value = {
+                    "number": 31,
+                    "labels": [{"name": "shinobi:working"}],
+                }
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "failed to push branch feature/issue-31-publish-phase: non-fast-forward",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        client.list_pull_requests_by_head.assert_not_called()
+        client.create_pull_request.assert_not_called()
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(31, remove=["shinobi:working"]),
+            ],
+        )
+        client.create_issue_comment.assert_called_once()
+        self.assertIn(
+            "failed to complete publish phase before creating or updating a PR",
+            client.create_issue_comment.call_args.args[1],
+        )
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "needs-human")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+
+    def test_publish_mission_rejects_state_from_different_run_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="previous-run",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with self.assertRaisesRegex(
+                MissionPublishError,
+                "publish phase requires local state run_id run-123",
+            ):
+                publish_mission(
+                    root=Path("/tmp/repo"),
+                    store=store,
+                    config=config,
+                    run_id="run-123",
+                    state=state,
+                    execution_result=execution_result,
+                )
+
+        run_mock.assert_not_called()
+        store.require_lock_owner.assert_not_called()
+
+    def test_publish_mission_rejects_state_from_different_agent_before_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-2",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch("shinobi.mission_publish.subprocess.run") as run_mock:
+            with self.assertRaisesRegex(
+                MissionPublishError,
+                "publish phase requires local state agent_identity agent-1",
+            ):
+                publish_mission(
+                    root=Path("/tmp/repo"),
+                    store=store,
+                    config=config,
+                    run_id="run-123",
+                    state=state,
+                    execution_result=execution_result,
+                )
+
+        run_mock.assert_not_called()
+        store.require_lock_owner.assert_not_called()
+
+    def test_find_mission_state_comment_matches_issue_and_branch(self) -> None:
+        comment = find_mission_state_comment(
+            [
+                {
+                    "id": 1,
+                    "body": (
+                        "<!-- shinobi:mission-state\n"
+                        "issue: 30\n"
+                        "branch: feature/issue-30-other\n"
+                        "-->"
+                    ),
+                },
+                {
+                    "id": 2,
+                    "body": (
+                        "<!-- shinobi:mission-state\n"
+                        "issue: 31\n"
+                        "branch: feature/issue-31-publish-phase\n"
+                        "-->"
+                    ),
+                },
+            ],
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+        )
+
+        self.assertEqual(comment["id"], 2)
+
+    def test_find_mission_state_comment_does_not_use_partial_issue_match(self) -> None:
+        comment = find_mission_state_comment(
+            [
+                {
+                    "id": 1,
+                    "body": (
+                        "<!-- shinobi:mission-state\n"
+                        "issue: 31\n"
+                        "branch: feature/issue-31-publish-phase\n"
+                        "-->"
+                    ),
+                },
+            ],
+            issue_number=3,
+            branch="feature/issue-31-publish-phase",
+        )
+
+        self.assertIsNone(comment)
+
+    def test_publish_mission_hands_off_when_pr_lookup_fails_after_push(self) -> None:
+        store = Mock()
+        config = Config(repo="owner/repo", agent_identity="agent-1")
+        state = cli.State(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            agent_identity="agent-1",
+            run_id="run-123",
+            phase="start",
+        )
+        execution_result = ExecutionResult(
+            commands=[],
+            change_summary="Published mission changes.",
+        )
+
+        with patch(
+            "shinobi.mission_publish.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                client = client_cls.return_value
+                client.get_issue.side_effect = [
+                    {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    },
+                    {
+                        "number": 31,
+                        "labels": [{"name": "shinobi:working"}],
+                    },
+                ]
+                client.list_pull_requests_by_head.side_effect = GitHubClientError(
+                    "api unavailable"
+                )
+
+                with self.assertRaisesRegex(
+                    MissionPublishError,
+                    "failed to look up existing PR for issue #31",
+                ):
+                    publish_mission(
+                        root=Path("/tmp/repo"),
+                        store=store,
+                        config=config,
+                        run_id="run-123",
+                        state=state,
+                        execution_result=execution_result,
+                    )
+
+        client.create_pull_request.assert_not_called()
+        self.assertEqual(
+            client.update_issue_labels.call_args_list,
+            [
+                unittest.mock.call(31, add=["shinobi:needs-human"]),
+                unittest.mock.call(31, remove=["shinobi:working"]),
+            ],
+        )
+        client.create_issue_comment.assert_called_once()
+        self.assertIn(
+            "failed to complete publish phase after pushing branch",
+            client.create_issue_comment.call_args.args[1],
+        )
+        self.assertIn(
+            "Branch: `feature/issue-31-publish-phase`",
+            client.create_issue_comment.call_args.args[1],
+        )
+        store.save_state.assert_called_once()
+        saved_state = store.save_state.call_args.args[0]
+        self.assertEqual(saved_state.phase, "idle")
+        self.assertEqual(saved_state.last_result, "needs-human")
+        self.assertEqual(saved_state.last_mission.issue_number, 31)
+        self.assertIsNone(saved_state.last_mission.pr_number)
+        self.assertEqual(saved_state.last_mission.branch, "feature/issue-31-publish-phase")
+        self.assertEqual(saved_state.last_mission.phase, "publish")
+        self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+
+    def test_parse_mission_state_fields_reads_marker_only(self) -> None:
+        fields = parse_mission_state_fields(
+            "issue: 999\n"
+            "<!-- shinobi:mission-state\n"
+            "issue: 31\n"
+            "branch: feature/issue-31-publish-phase\n"
+            "phase: publish\n"
+            "-->\n"
+        )
+
+        self.assertEqual(fields["issue"], "31")
+        self.assertEqual(fields["branch"], "feature/issue-31-publish-phase")
+        self.assertEqual(fields["phase"], "publish")
+
+    def test_build_same_repo_head_selector_uses_plain_branch_name(self) -> None:
+        self.assertEqual(
+            build_same_repo_head_selector("owner/repo", "feature/issue-31-publish-phase"),
+            "feature/issue-31-publish-phase",
+        )
+
+    def test_build_same_repo_head_selector_falls_back_without_owner(self) -> None:
+        self.assertEqual(
+            build_same_repo_head_selector("owner-repo", "feature/issue-31-publish-phase"),
+            "feature/issue-31-publish-phase",
+        )
+
+
 class ContextBuilderTest(unittest.TestCase):
     def test_build_mission_context_reads_issue_and_local_knowledge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2329,6 +3614,124 @@ class GitHubClientTest(unittest.TestCase):
         self.assertIn("--draft", create_command)
         self.assertIn("--head", create_command)
         self.assertIn("feature/issue-25", create_command)
+
+    def test_list_pull_requests_by_head_returns_open_prs_for_branch(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "pr", "list"],
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "number": 42,
+                        "url": "https://github.com/owner/repo/pull/42",
+                        "isDraft": True,
+                        "headRefName": "feature/issue-25",
+                        "baseRefName": "main",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                prs = client.list_pull_requests_by_head("feature/issue-25")
+
+        self.assertEqual(prs[0]["number"], 42)
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command[:3], ["gh", "pr", "list"])
+        self.assertIn("--head", command)
+        self.assertIn("feature/issue-25", command)
+        self.assertIn("--state", command)
+        self.assertIn("open", command)
+
+    def test_list_pull_requests_by_head_rejects_non_list_payload(self) -> None:
+        response = subprocess.CompletedProcess(
+            args=["gh", "pr", "list"],
+            returncode=0,
+            stdout=json.dumps({"number": 42}),
+            stderr="",
+        )
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", return_value=response):
+                client = GitHubClient(Path("/tmp/repo"))
+                with self.assertRaisesRegex(
+                    GitHubClientError,
+                    "failed to parse PR list for head feature/issue-25",
+                ):
+                    client.list_pull_requests_by_head("feature/issue-25")
+
+    def test_convert_pull_request_to_draft_fetches_updated_pr_metadata(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["gh", "pr", "ready", "42", "--undo"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["gh", "pr", "view", "42"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "number": 42,
+                        "url": "https://github.com/owner/repo/pull/42",
+                        "isDraft": True,
+                        "headRefName": "feature/issue-25",
+                        "baseRefName": "main",
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                pr = client.convert_pull_request_to_draft(42)
+
+        self.assertEqual(pr["number"], 42)
+        self.assertEqual(run_mock.call_count, 2)
+        ready_command = run_mock.call_args_list[0].args[0]
+        self.assertEqual(ready_command[:4], ["gh", "pr", "ready", "42"])
+        self.assertIn("--undo", ready_command)
+
+    def test_convert_pull_request_to_ready_fetches_updated_pr_metadata(self) -> None:
+        responses = [
+            subprocess.CompletedProcess(
+                args=["gh", "pr", "ready", "42"],
+                returncode=0,
+                stdout="",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["gh", "pr", "view", "42"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "number": 42,
+                        "url": "https://github.com/owner/repo/pull/42",
+                        "isDraft": False,
+                        "headRefName": "feature/issue-25",
+                        "baseRefName": "main",
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+
+        with patch("shinobi.github_client.discover_repo_slug", return_value="owner/repo"):
+            with patch("shinobi.github_client.subprocess.run", side_effect=responses) as run_mock:
+                client = GitHubClient(Path("/tmp/repo"))
+                pr = client.convert_pull_request_to_ready(42)
+
+        self.assertEqual(pr["number"], 42)
+        self.assertEqual(run_mock.call_count, 2)
+        ready_command = run_mock.call_args_list[0].args[0]
+        self.assertEqual(ready_command[:4], ["gh", "pr", "ready", "42"])
+        self.assertNotIn("--undo", ready_command)
 
     def test_init_keeps_shinobi_directory_ignored_by_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

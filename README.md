@@ -76,7 +76,7 @@ shinobi run --issue 123
 
 `watch` や phase 分離コマンドは将来候補です。MVP の公開 CLI には含めません。
 
-現在の実装では foundations に加えて、`shinobi run` / `shinobi run --issue <id>` の select と start phase まで実装しています。Issue 選択、`.shinobi/run.lock` によるローカル排他、`feature/issue-<id>-<slug>` branch 作成、start 用の machine-readable comment 投稿、状態 label 正規化が動作します。context builder は Issue とローカル knowledge から最小実行コンテキストを構築できますが、run phase への統合は未実装です。start 完了後はいったん `shinobi:needs-human` へ handoff して安全停止します。
+現在の実装では foundations に加えて、`shinobi run` / `shinobi run --issue <id>` の select / start / publish phase まで実装しています。Issue 選択、`.shinobi/run.lock` によるローカル排他、`feature/issue-<id>-<slug>` branch 作成、start 用の machine-readable comment 投稿、検証コマンド実行、branch push、draft PR 作成または更新、publish 用の label / mission-state comment 更新が動作します。context builder は Issue とローカル knowledge から最小実行コンテキストを構築できますが、run phase への統合は未実装です。
 
 ## ドキュメント構成
 
@@ -87,4 +87,4 @@ shinobi run --issue 123
 
 ## 現在の状態
 
-このリポジトリは foundations 実装に加え、`run` の start phase と context builder を持ちます。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示、`run` の issue 選択、stale/live lock 判定、branch 作成、start 用 comment 投稿、GitHub label の start 遷移、安全 handoff、Issue 由来の最小 context 構築までを持ちます。context phase の run 統合、PR 自動化、review loop はこれから実装します。
+このリポジトリは foundations 実装に加え、`run` の start / publish phase と context builder を持ちます。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示、`run` の issue 選択、stale/live lock 判定、branch 作成、start 用 comment 投稿、GitHub label の start 遷移、検証コマンド実行、branch push、draft PR 作成または更新、publish 用 comment / label / state 更新、Issue 由来の最小 context 構築までを持ちます。context phase の run 統合、review loop、自動 merge はこれから実装します。

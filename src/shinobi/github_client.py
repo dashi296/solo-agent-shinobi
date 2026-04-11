@@ -157,6 +157,20 @@ class GitHubClient:
         self._run_gh(args, action=f"update PR #{pr_number}")
         return self.get_pull_request(str(pr_number))
 
+    def convert_pull_request_to_draft(self, pr_number: int) -> dict[str, Any]:
+        self._run_gh(
+            ["pr", "ready", str(pr_number), "--undo"],
+            action=f"convert PR #{pr_number} to draft",
+        )
+        return self.get_pull_request(str(pr_number))
+
+    def convert_pull_request_to_ready(self, pr_number: int) -> dict[str, Any]:
+        self._run_gh(
+            ["pr", "ready", str(pr_number)],
+            action=f"mark PR #{pr_number} ready for review",
+        )
+        return self.get_pull_request(str(pr_number))
+
     def get_pull_request(self, identifier: str) -> dict[str, Any]:
         payload = self._run_gh_json(
             ["pr", "view", identifier, "--json", "number,url,isDraft,headRefName,baseRefName"],
@@ -165,6 +179,26 @@ class GitHubClient:
         if not isinstance(payload, dict):
             raise GitHubClientError(f"failed to parse PR {identifier}: expected object payload")
         return payload
+
+    def list_pull_requests_by_head(self, head: str) -> list[dict[str, Any]]:
+        payload = self._run_gh_json(
+            [
+                "pr",
+                "list",
+                "--head",
+                head,
+                "--state",
+                "open",
+                "--json",
+                "number,url,isDraft,headRefName,baseRefName",
+            ],
+            action=f"list PRs for head {head}",
+        )
+        if not isinstance(payload, list):
+            raise GitHubClientError(
+                f"failed to parse PR list for head {head}: expected list payload"
+            )
+        return [pr for pr in payload if isinstance(pr, dict)]
 
     def get_ci_status(self, pr_number: int) -> list[dict[str, Any]]:
         payload = self._run_gh_json(

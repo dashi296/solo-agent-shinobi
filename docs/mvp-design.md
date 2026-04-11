@@ -367,6 +367,8 @@ needs-human -> ready
 - finalize blocked: `shinobi:blocked` を付与し、`shinobi:risky` を除く他の状態 label を除去する
 - finalize needs-human: `shinobi:needs-human` を付与し、`shinobi:risky` を除く他の状態 label を除去する
 
+publish 直前に現在の Issue がすでに `shinobi:blocked` または `shinobi:needs-human` を持つ場合は、人手の停止判断を優先し、push / PR 作成前に publish を中止します。
+
 `shinobi:risky` は補助ラベルなので自動では除去しません。
 
 ## ドメインモデル

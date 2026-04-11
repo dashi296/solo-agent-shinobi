@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import discover_workspace_root
+from .executor import execute_verification
 from .issue_selector import (
     ensure_open_issue,
     load_issue,
@@ -15,14 +16,19 @@ from .issue_selector import (
     list_open_issues_with_any_label,
     select_ready_issue,
 )
-from .mission_start import MissionStartError, handoff_started_mission, start_mission
-from .models import State
-from .state_store import StateStore
-
-CONTEXT_PHASE_NOT_IMPLEMENTED_REASON = (
-    "Shinobi completed the start phase, but the context phase is not implemented yet. "
-    "Handing off this mission for manual follow-up."
+from .mission_publish import (
+    MissionPublishError,
+    blocking_verification_results,
+    publish_mission,
 )
+from .mission_start import (
+    MissionStartError,
+    StartedMission,
+    handoff_started_mission,
+    start_mission,
+)
+from .models import Config, ExecutionResult, State
+from .state_store import StateStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -194,15 +200,24 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 issue=issue,
                 now=now,
             )
-            handoff_started_mission(
+            execution_result = execute_verification(root, config)
+            handoff_failed_verification(
                 root=root,
                 store=store,
                 config=config,
                 run_id=run_id,
                 started_mission=started_mission,
-                reason=CONTEXT_PHASE_NOT_IMPLEMENTED_REASON,
+                execution_result=execution_result,
             )
-        except (MissionStartError, RuntimeError, ValueError) as error:
+            published_mission = publish_mission(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                state=store.load_state(),
+                execution_result=execution_result,
+            )
+        except (MissionStartError, MissionPublishError, RuntimeError, ValueError) as error:
             print(f"run aborted: {error}")
             return 1
 
@@ -213,8 +228,11 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
             print("run lock: acquired for select phase")
         print(f"selected_issue: {selected_issue}")
         print(f"started_branch: {started_mission.branch}")
-        print(f"lease_expires_at: {started_mission.lease_expires_at}")
-        print("next_phase: manual-handoff")
+        print(f"published_pr: #{published_mission.pr_number}")
+        if published_mission.pr_url:
+            print(f"published_pr_url: {published_mission.pr_url}")
+        print(f"lease_expires_at: {published_mission.lease_expires_at}")
+        print("next_phase: review")
         return 0
     finally:
         store.clear_lock(run_id)
@@ -244,6 +262,37 @@ def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int
         )
 
     return None
+
+
+def handoff_failed_verification(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+    execution_result: ExecutionResult,
+) -> None:
+    blocking_results = blocking_verification_results(execution_result)
+    if not blocking_results:
+        return
+
+    rendered_results = ", ".join(
+        f"{command.name}: {command.status}" for command in blocking_results
+    )
+    reason = (
+        "Shinobi stopped before publish because verification failed or errored "
+        f"({rendered_results})."
+    )
+    handoff_started_mission(
+        root=root,
+        store=store,
+        config=config,
+        run_id=run_id,
+        started_mission=started_mission,
+        reason=reason,
+    )
+    raise MissionPublishError(reason)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
