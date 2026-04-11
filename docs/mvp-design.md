@@ -215,9 +215,8 @@ fatal 時の補償動作:
 
 - 対象ファイルだけ編集する
 - high-risk path 候補に実際に触れる必要があるかを、publish 前に最終判定する
-- publish 前に high-risk path が確定した場合でも、human handoff に必要な差分があるなら branch を push し、原則 draft PR を作成または更新してから `needs-human` または `blocked` に遷移する
-- この pre-publish stop で PR を作成または更新した場合も、machine-readable な mission-state コメントを同じ mission の comment 上で upsert し、最新の `pr`, `phase`, `lease_expires_at` を反映して recovery と整合させる
-- publish 前に差分が無いか共有価値が無い場合だけ、PR を作らず停止する
+- publish 前に high-risk path が確定した場合は、現行実装では push / PR 作成前に停止して `needs-human` へ handoff する
+- high-risk path 停止で PR を残したまま handoff する挙動は将来拡張として扱う
 - execute 中は `mission_heartbeat_interval_minutes` ごとに定期 heartbeat を更新する
 - 長時間処理に入る前と各 retry 後にも即時 heartbeat を更新する
 - lint / typecheck / test を実行する
@@ -496,7 +495,7 @@ MVP の重要点は「必要最小限しか読まない」ことです。
 
 Shinobi 関連ログは自由文検索ではなく、HTML comment marker の中に固定 schema の key-value block を持つ machine-readable comment を前提にします。最低でも `issue`, `branch`, `phase`, `lease_expires_at`, `pr`, `agent_identity`, `run_id` を含めます。recovery は自由文本文ではなく marker 内 block だけを parse 対象にします。`agent_identity` は `init` が生成する workspace / installation ごとの一意 ID で、複数 runner 間で共有しません。
 
-同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。high-risk path などで publish 前に停止する場合でも、PR を作成または更新したなら同じ comment を upsert して `pr` と停止時の phase を最新化します。stale recovery は最新の mission-state comment の marker 内 block の値を truth 候補として参照します。`pr: null` は start から publish 前までの mission に限って許容し、その場合は branch 実体と phase 整合を追加で確認します。publish 済みのはずなのに古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。`agent_identity` が現在設定の一意な `agent_identity` と一致しないコメントは ownership 不一致として resume 根拠から除外します。
+同じ mission については、開始時に新規作成した mission-state コメントを publish / review / recovery 時に upsert して使い回します。現行実装の high-risk path 停止は publish 前 handoff なので、comment は start phase のまま `pr: null` を維持します。stale recovery は最新の mission-state comment の marker 内 block の値を truth 候補として参照します。`pr: null` は start から publish 前までの mission に限って許容し、その場合は branch 実体と phase 整合を追加で確認します。publish 済みのはずなのに古い phase や `pr: null` のまま放置されたコメントは resume 根拠に使いません。`agent_identity` が現在設定の一意な `agent_identity` と一致しないコメントは ownership 不一致として resume 根拠から除外します。
 
 出力:
 
@@ -552,7 +551,7 @@ MVP では次の 2 種類を分けて扱います。
 - `shinobi:risky`: Issue-level の manual merge 指示。publish までは進めるが auto-merge はしない
 - high-risk path: execution risk。対象ファイルが `migrations/` `infra/` `auth/` `billing/` などに触れる必要があるなら publish 前でも停止しうる
 
-high-risk path の一次判定は context で候補抽出し、最終判定は execute 完了前に行います。publish 前に確定した場合でも、human handoff に必要な差分があるなら branch を push し、原則 draft PR を作成または更新したうえで `needs-human` か `blocked` に遷移します。差分が無いか共有価値が無い場合だけ PR 未作成で停止します。publish 後の review で追加検知した場合は PR を残したまま `needs-human` に遷移します。
+high-risk path の一次判定は context で候補抽出し、最終判定は execute 完了後の pre-publish stop で行います。現行実装では publish 前に確定した時点で push / PR 作成前に停止し、start-phase mission を `needs-human` に遷移します。publish 後の review で追加検知した場合は PR を残したまま `needs-human` に遷移します。差分共有のために PR を残したまま handoff する挙動は将来拡張とします。
 
 ### high-risk path 例
 
