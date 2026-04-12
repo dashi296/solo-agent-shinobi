@@ -1217,13 +1217,15 @@ def cleanup_retryable_local_only_state(
     conclusion: str,
     error: str,
 ) -> str | None:
+    current_workspace_identity = config.agent_identity
+    state_belongs_to_current_workspace = state.agent_identity == current_workspace_identity
     try:
         store.save_state(
             State(
                 issue_number=None,
                 pr_number=None,
                 branch=None,
-                agent_identity=state.agent_identity,
+                agent_identity=current_workspace_identity,
                 run_id=None,
                 phase="idle",
                 review_loop_count=0,
@@ -1244,6 +1246,9 @@ def cleanup_retryable_local_only_state(
         return f"failed to clear retryable local-only state: {save_error}"
 
     if state.issue_number is None:
+        return None
+
+    if not state_belongs_to_current_workspace:
         return None
 
     try:

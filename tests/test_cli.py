@@ -2883,6 +2883,65 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
+    def test_run_cleans_up_foreign_retryable_local_only_state_without_github_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, _ = store.try_load_config()
+                    assert config is not None
+                    state = store.load_state()
+                    state.issue_number = 6
+                    state.phase = "start"
+                    state.branch = "feature/issue-6-run-start-phase"
+                    state.run_id = "previous-run"
+                    state.agent_identity = "other/repo#default@test"
+                    state.retryable_local_only = True
+                    store.save_state(state)
+                    (store.paths.logs_dir / "retryable-start-failures.jsonl").write_text(
+                        json.dumps(
+                            {
+                                "issue_number": 6,
+                                "branch": state.branch,
+                                "phase": "start",
+                                "agent_identity": state.agent_identity,
+                                "run_id": "previous-run",
+                                "retryable_local_only": True,
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    fake_client = FakeGitHubClient(
+                        issue_number=6,
+                        title="[TASK] run start phase",
+                        labels=["shinobi:ready"],
+                    )
+
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=fake_client):
+                        with redirect_stdout(output):
+                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: retryable local-only mission for issue #6 could not be resumed: "
+                "agent_identity does not match current workspace "
+                f"(other/repo#default@test != {config.agent_identity})",
+                output.getvalue(),
+            )
+            repaired_state = store.load_state()
+            self.assertEqual(repaired_state.phase, "idle")
+            self.assertFalse(repaired_state.retryable_local_only)
+            self.assertEqual(repaired_state.agent_identity, config.agent_identity)
+            self.assertEqual(repaired_state.last_result, "aborted")
+            self.assertEqual(len(fake_client.comments), 0)
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
     def test_cleanup_retryable_local_only_state_reports_state_persistence_failure(self) -> None:
         state = State(
             issue_number=6,
