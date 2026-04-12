@@ -182,6 +182,33 @@ class ExecutionResult:
 
 
 @dataclass(frozen=True)
+class MissionContext:
+    issue_number: int
+    issue_title: str
+    mission_summary: str
+    completion_criteria: List[str]
+    scope_out: List[str]
+    reference_files: List[str]
+    candidate_files: List[str]
+    prohibited_actions: List[str]
+    summary: str
+    decisions: str
+    requirements: List[str] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+    review_note_categories: List[str] = field(default_factory=list)
+    review_note_entries: Dict[str, List[str]] = field(default_factory=dict)
+    needs_human_review: bool = False
+    needs_human_review_reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MissionContext":
+        return cls(**data)
+
+
+@dataclass(frozen=True)
 class StopDecision:
     reason: str
     conclusion: str

@@ -108,7 +108,7 @@ src/shinobi/
 - `models.py`: ドメインモデル
 - `github_client.py`: GitHub API 操作
 - `issue_selector.py`: 次 Issue 選択
-- `context_builder.py`: 最小コンテキスト生成
+- `context_builder.py`: 最小コンテキスト生成と review-notes の関連カテゴリ抽出
 - `mission_finalize.py`: 終端 comment、label 正規化、Issue close、final state 保存、lock 解放
 - `executor.py`: 実装フェーズの検証コマンド実行と結果構造化
 - `mission_publish.py`: branch push、draft PR 作成または更新、publish 状態の label / comment / state 更新

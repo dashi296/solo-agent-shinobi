@@ -12,6 +12,7 @@ from typing import Any, Callable, List, Optional
 from urllib.parse import urlparse
 
 from .config import discover_workspace_root
+from .context_builder import build_mission_context
 from .executor import (
     collect_paths_against_base_ref,
     detect_high_risk_stop,
@@ -50,7 +51,7 @@ from .mission_start import (
     start_mission,
 )
 from .merger import MergerError, evaluate_merge, merge_pull_request
-from .models import Config, ExecutionResult, MissionSummary, State, StopDecision
+from .models import Config, ExecutionResult, MissionContext, MissionSummary, State, StopDecision
 from .reviewer import ReviewerError, collect_diff_stats, wait_for_ci
 from .state_store import StateStore
 
@@ -1345,10 +1346,10 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 return 1
 
         try:
+            issue = load_issue(root, selected_issue, repo=config.repo)
             if active_recovery is not None and active_recovery.started_mission is not None:
                 started_mission = active_recovery.started_mission
             else:
-                issue = load_issue(root, selected_issue, repo=config.repo)
                 if local_only_issue is not None:
                     started_mission = resume_local_only_mission(
                         root=root,
@@ -1368,6 +1369,14 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                         issue=issue,
                         now=now,
                     )
+            build_and_persist_mission_context(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+                issue=issue,
+            )
             execution_result = execute_started_mission(
                 root=root,
                 store=store,
@@ -1481,6 +1490,89 @@ def execute_started_mission(
         raise MissionPublishError(reason) from error
 
     return execution_result
+
+
+def build_and_persist_mission_context(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+    issue: dict[str, Any],
+) -> MissionContext:
+    try:
+        state, state_error = store.try_load_state()
+        if state is None:
+            raise RuntimeError(f"failed to load local state before context phase: {state_error}")
+        mission_context = build_mission_context(root, issue)
+        persist_mission_context(
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=state,
+            started_mission=started_mission,
+            mission_context=mission_context,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        reason = f"Shinobi failed during context phase: {error}"
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason) from error
+
+    if mission_context.needs_human_review:
+        reason = (
+            "Shinobi stopped before execute because context phase requires human review: "
+            f"{mission_context.needs_human_review_reason}."
+        )
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason)
+
+    return mission_context
+
+
+def persist_mission_context(
+    *,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    state: State,
+    started_mission: StartedMission,
+    mission_context: MissionContext,
+) -> None:
+    lease_expires_at = store.format_timestamp(
+        datetime.now(timezone.utc) + timedelta(minutes=config.mission_lease_minutes)
+    )
+    store.save_state(
+        State(
+            issue_number=state.issue_number or started_mission.issue_number,
+            pr_number=state.pr_number,
+            branch=state.branch or started_mission.branch,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
+            phase="start",
+            review_loop_count=state.review_loop_count,
+            retryable_local_only=False,
+            lease_expires_at=lease_expires_at,
+            last_result=state.last_result,
+            last_error=state.last_error,
+            last_mission=state.last_mission,
+            extra={**state.extra, "mission_context": mission_context.to_dict()},
+        )
+    )
 
 
 def build_execute_heartbeat(

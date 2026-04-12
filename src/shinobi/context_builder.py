@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
+from .models import MissionContext
 from .state_store import StateStore
 
 
@@ -42,23 +42,54 @@ REFERENCE_SOURCE_SECTIONS = (
     "targets",
 )
 
-
-@dataclass(frozen=True)
-class MissionContext:
-    issue_number: int
-    issue_title: str
-    mission_summary: str
-    completion_criteria: list[str]
-    scope_out: list[str]
-    reference_files: list[str]
-    candidate_files: list[str]
-    prohibited_actions: list[str]
-    summary: str
-    decisions: str
-    requirements: list[str] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
-    needs_human_review: bool = False
-    needs_human_review_reason: str | None = None
+DEFAULT_REVIEW_NOTE_CATEGORIES = ("scope-control", "state-transition")
+REVIEW_NOTE_CATEGORY_SIGNALS = {
+    "state-transition": (
+        "label",
+        "phase",
+        "state",
+        "publish",
+        "review",
+        "start",
+        "run",
+        "transition",
+        "lease",
+    ),
+    "cleanup-recovery": (
+        "cleanup",
+        "recovery",
+        "resume",
+        "retryable",
+        "stale",
+        "rollback",
+        "lock",
+        "failure",
+    ),
+    "test-coverage": (
+        "test",
+        "tests",
+        "ci",
+        "workflow",
+        "coverage",
+        "verification",
+    ),
+    "scope-control": (
+        "scope",
+        "candidate",
+        "minimal context",
+        "single task",
+        "broad",
+        "refactor",
+    ),
+    "docs-consistency": (
+        "readme",
+        "docs",
+        "spec",
+        "architecture",
+        "mvp",
+        "documentation",
+    ),
+}
 
 
 def build_mission_context(root: Path, issue: dict) -> MissionContext:
@@ -68,6 +99,9 @@ def build_mission_context(root: Path, issue: dict) -> MissionContext:
 
     summary = read_optional_text(store.paths.summary_path)
     decisions = read_optional_text(store.paths.decisions_path)
+    review_notes_sections = parse_review_note_sections(
+        read_optional_text(store.paths.review_notes_path)
+    )
     issue_paths = extract_paths_from_sections(
         sections,
         keys=REFERENCE_SOURCE_SECTIONS,
@@ -90,7 +124,14 @@ def build_mission_context(root: Path, issue: dict) -> MissionContext:
             *issue_paths,
         ]
     )
-    needs_human_review_reason = broad_scope_reason(sections, candidate_files)
+    review_note_categories = select_review_note_categories(
+        issue=issue,
+        sections=sections,
+        candidate_files=candidate_files,
+        reference_files=reference_files,
+        available_categories=list(review_notes_sections),
+    )
+    needs_human_review_reason = broad_scope_reason(body, sections, candidate_files)
 
     return MissionContext(
         issue_number=int(issue["number"]),
@@ -108,6 +149,12 @@ def build_mission_context(root: Path, issue: dict) -> MissionContext:
         decisions=decisions,
         requirements=sections.get("requirements", []),
         notes=sections.get("notes", []),
+        review_note_categories=review_note_categories,
+        review_note_entries={
+            category: review_notes_sections[category]
+            for category in review_note_categories
+            if category in review_notes_sections
+        },
         needs_human_review=needs_human_review_reason is not None,
         needs_human_review_reason=needs_human_review_reason,
     )
@@ -254,9 +301,13 @@ def derive_prohibited_actions(sections: dict[str, list[str]]) -> list[str]:
 
 
 def broad_scope_reason(
-    sections: dict[str, list[str]], candidate_files: list[str]
+    body: str,
+    sections: dict[str, list[str]],
+    candidate_files: list[str],
 ) -> str | None:
     if not candidate_files:
+        if not body.strip():
+            return None
         return "issue body does not name candidate files"
 
     scope_text = "\n".join(
@@ -270,6 +321,107 @@ def broad_scope_reason(
             return f"issue body contains broad scope marker: {word}"
 
     return None
+
+
+def parse_review_note_sections(body: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current_key: str | None = None
+    current_lines: list[str] = []
+
+    for line in body.splitlines():
+        heading_match = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$", line)
+        if heading_match is not None:
+            level = len(heading_match.group(1))
+            heading = heading_match.group(2).strip().lower()
+            if level == 2:
+                if current_key is not None:
+                    append_section(sections, current_key, current_lines)
+                current_key = heading
+                current_lines = []
+                continue
+            if level < 2:
+                if current_key is not None:
+                    append_section(sections, current_key, current_lines)
+                current_key = None
+                current_lines = []
+                continue
+            if current_key is not None:
+                current_lines.append(heading)
+            continue
+
+        if current_key is not None:
+            current_lines.append(line)
+
+    if current_key is not None:
+        append_section(sections, current_key, current_lines)
+
+    return {key: values for key, values in sections.items() if values}
+
+
+def select_review_note_categories(
+    *,
+    issue: dict,
+    sections: dict[str, list[str]],
+    candidate_files: list[str],
+    reference_files: list[str],
+    available_categories: list[str],
+) -> list[str]:
+    if not available_categories:
+        return []
+
+    scoring_text = "\n".join(
+        [
+            str(issue.get("title") or ""),
+            *sections.get("purpose", []),
+            *sections.get("requirements", []),
+            *sections.get("notes", []),
+            *sections.get("scope_out", []),
+            *candidate_files,
+            *reference_files,
+        ]
+    ).lower()
+
+    scored_categories: list[tuple[int, int, str]] = []
+    for index, category in enumerate(available_categories):
+        score = review_note_category_score(category, scoring_text, candidate_files, reference_files)
+        scored_categories.append((score, -index, category))
+
+    selected = [
+        category
+        for score, _, category in sorted(scored_categories, reverse=True)
+        if score > 0
+    ][:2]
+    if selected:
+        return selected
+
+    fallback = [category for category in DEFAULT_REVIEW_NOTE_CATEGORIES if category in available_categories]
+    if fallback:
+        return fallback[:2]
+    return available_categories[:2]
+
+
+def review_note_category_score(
+    category: str,
+    scoring_text: str,
+    candidate_files: list[str],
+    reference_files: list[str],
+) -> int:
+    score = 0
+    for signal in REVIEW_NOTE_CATEGORY_SIGNALS.get(category, ()):
+        score += scoring_text.count(signal)
+
+    paths = [*candidate_files, *reference_files]
+    if category == "docs-consistency" and any(
+        path == "README.md" or path.startswith("docs/") for path in paths
+    ):
+        score += 3
+    if category == "test-coverage" and any(path.startswith("tests/") for path in paths):
+        score += 3
+    if category == "scope-control" and ("broad scope" in scoring_text or "candidate" in scoring_text):
+        score += 3
+    if category == "scope-control" and not candidate_files:
+        score += 2
+    return score
 
 
 def unique_items(items: list[str]) -> list[str]:
