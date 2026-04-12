@@ -1670,6 +1670,13 @@ def stale_active_mission_recovery_error(
     phase = mission_fields["phase"]
     if phase not in {"start", "publish", "review"}:
         return f"mission-state phase {phase} is not resumable"
+    active_label_names = label_names.intersection(active_labels)
+    if len(active_label_names) > 1:
+        rendered = ", ".join(sorted(active_label_names))
+        return f"issue has multiple active mission labels: {rendered}"
+    expected_label = config.labels["working"] if phase == "start" else config.labels["reviewing"]
+    if expected_label not in label_names:
+        return f"mission-state phase {phase} requires issue label {expected_label}"
 
     branch = mission_fields["branch"]
     if not git_local_branch_exists(root, branch):
@@ -1686,6 +1693,8 @@ def stale_active_mission_recovery_error(
         pr_number = parse_optional_mission_pr_number(mission_fields.get("pr"))
     except ValueError as error:
         return str(error)
+    if phase == "start" and pr_number is not None:
+        return "mission-state phase start requires pr null"
     if phase in {"publish", "review"} and pr_number is None:
         return f"mission-state phase {phase} requires pr"
     return None
