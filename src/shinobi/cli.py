@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -407,6 +408,17 @@ def command_review(
         print(
             "review aborted: local mission state belongs to a different agent "
             f"({state.agent_identity})"
+        )
+        return 1
+    try:
+        current_branch = load_current_branch(root)
+    except RuntimeError as error:
+        print(f"review aborted: {error}")
+        return 1
+    if current_branch != state.branch:
+        print(
+            "review aborted: current git branch "
+            f"{current_branch} does not match mission branch {state.branch}"
         )
         return 1
 
@@ -953,6 +965,30 @@ def require_review_branch(state: State) -> str:
     if not state.branch:
         raise ReviewerError("review retry requires branch")
     return state.branch
+
+
+def load_current_branch(root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise RuntimeError(f"failed to resolve current git branch: {error}") from error
+
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"git exited with {result.returncode}"
+        raise RuntimeError(f"failed to resolve current git branch: {message}")
+
+    branch = result.stdout.strip()
+    if not branch:
+        raise RuntimeError("failed to resolve current git branch: git returned an empty branch name")
+    if branch == "HEAD":
+        raise RuntimeError("current git checkout is detached; review requires the mission branch")
+    return branch
 
 
 def build_review_state(

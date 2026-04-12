@@ -602,16 +602,20 @@ class CliTest(unittest.TestCase):
                                         status="success",
                                     ),
                                 ) as wait_for_ci_mock:
-                                    with redirect_stdout(output):
-                                        exit_code = cli.main(
-                                            [
-                                                "review",
-                                                "--timeout-seconds",
-                                                "30",
-                                                "--poll-interval-seconds",
-                                                "5",
-                                            ]
-                                        )
+                                    with patch(
+                                        "shinobi.cli.load_current_branch",
+                                        return_value="feature/issue-33-review-ci",
+                                    ):
+                                        with redirect_stdout(output):
+                                            exit_code = cli.main(
+                                                [
+                                                    "review",
+                                                    "--timeout-seconds",
+                                                    "30",
+                                                    "--poll-interval-seconds",
+                                                    "5",
+                                                ]
+                                            )
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -717,8 +721,12 @@ class CliTest(unittest.TestCase):
                                         status="success",
                                     ),
                                 ):
-                                    with redirect_stdout(output):
-                                        exit_code = cli.main(["review"])
+                                    with patch(
+                                        "shinobi.cli.load_current_branch",
+                                        return_value="feature/issue-33-review-ci",
+                                    ):
+                                        with redirect_stdout(output):
+                                            exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -804,8 +812,12 @@ class CliTest(unittest.TestCase):
                                         status="success",
                                     ),
                                 ):
-                                    with redirect_stdout(output):
-                                        exit_code = cli.main(["review"])
+                                    with patch(
+                                        "shinobi.cli.load_current_branch",
+                                        return_value="feature/issue-33-review-ci",
+                                    ):
+                                        with redirect_stdout(output):
+                                            exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -877,8 +889,12 @@ class CliTest(unittest.TestCase):
                                 timed_out=True,
                             ),
                         ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["review"])
+                            with patch(
+                                "shinobi.cli.load_current_branch",
+                                return_value="feature/issue-33-review-ci",
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -966,8 +982,12 @@ class CliTest(unittest.TestCase):
                                     "shinobi.cli.wait_for_ci",
                                     side_effect=wait_for_ci_side_effect,
                                 ):
-                                    with redirect_stdout(io.StringIO()):
-                                        exit_code = cli.main(["review"])
+                                    with patch(
+                                        "shinobi.cli.load_current_branch",
+                                        return_value="feature/issue-33-review-ci",
+                                    ):
+                                        with redirect_stdout(io.StringIO()):
+                                            exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(client.update_issue_comment.call_count, 3)
@@ -1044,8 +1064,12 @@ class CliTest(unittest.TestCase):
                                 "shinobi.cli.execute_verification",
                                 return_value=execution_result,
                             ) as execute_verification_mock:
-                                with redirect_stdout(output):
-                                    exit_code = cli.main(["review"])
+                                with patch(
+                                    "shinobi.cli.load_current_branch",
+                                    return_value="feature/issue-33-review-ci",
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -1131,8 +1155,12 @@ class CliTest(unittest.TestCase):
                                     status="failure",
                                 ),
                             ):
-                                with redirect_stdout(output):
-                                    exit_code = cli.main(["review"])
+                                with patch(
+                                    "shinobi.cli.load_current_branch",
+                                    return_value="feature/issue-33-review-ci",
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -1321,8 +1349,12 @@ class CliTest(unittest.TestCase):
                                     "shinobi.cli.execute_verification",
                                     return_value=execution_result,
                                 ) as execute_verification_mock:
-                                    with redirect_stdout(output):
-                                        exit_code = cli.main(["review"])
+                                    with patch(
+                                        "shinobi.cli.load_current_branch",
+                                        return_value="feature/issue-33-review-ci",
+                                    ):
+                                        with redirect_stdout(output):
+                                            exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -1390,8 +1422,12 @@ class CliTest(unittest.TestCase):
                             "shinobi.cli.wait_for_ci",
                             side_effect=ReviewerError("api unavailable"),
                         ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["review"])
+                            with patch(
+                                "shinobi.cli.load_current_branch",
+                                return_value="feature/issue-33-review-ci",
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn("review aborted: api unavailable", output.getvalue())
@@ -1459,8 +1495,12 @@ class CliTest(unittest.TestCase):
                                 status="success",
                             ),
                         ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["review"])
+                            with patch(
+                                "shinobi.cli.load_current_branch",
+                                return_value="feature/issue-33-review-ci",
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
@@ -1547,6 +1587,47 @@ class CliTest(unittest.TestCase):
                 output.getvalue(),
             )
             client.assert_not_called()
+            self.assertIsNone(store.load_lock())
+
+    def test_review_aborts_when_current_branch_does_not_match_mission_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch("shinobi.cli.load_current_branch", return_value="main"):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: current git branch main does not match mission branch "
+                "feature/issue-33-review-ci",
+                output.getvalue(),
+            )
+            client.assert_not_called()
+            self.assertEqual(store.load_state().phase, "publish")
+            self.assertEqual(store.load_state().last_result, "published")
             self.assertIsNone(store.load_lock())
 
     def test_review_rejects_invalid_poll_interval_before_side_effects(self) -> None:
