@@ -58,6 +58,7 @@ from shinobi.models import (
     Config,
     DiffStats,
     ExecutionResult,
+    MissionContext,
     MissionSummary,
     PullRequestCheck,
     ReviewDecision,
@@ -2636,6 +2637,308 @@ class CliTest(unittest.TestCase):
             self.assertEqual(
                 saved_state.extra["self_review"]["verification"]["change_summary"],
                 "Changed auth flow.",
+            )
+
+    def test_run_persists_mission_context_before_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    published_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        pr_number=31,
+                        pr_url="https://github.com/owner/repo/pull/31",
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    mission_context = MissionContext(
+                        issue_number=6,
+                        issue_title="Run start phase",
+                        mission_summary="Build run context.",
+                        completion_criteria=["context phase runs"],
+                        scope_out=["auto-fix review loop"],
+                        reference_files=[".shinobi/summary.md", "src/shinobi/cli.py"],
+                        candidate_files=["src/shinobi/cli.py", "tests/test_cli.py"],
+                        prohibited_actions=["Do not include: auto-fix review loop"],
+                        summary="summary text\n",
+                        decisions="decision text\n",
+                        review_note_categories=["state-transition", "scope-control"],
+                        review_note_entries={
+                            "state-transition": ["rule a"],
+                            "scope-control": ["rule b"],
+                        },
+                    )
+
+                    def start_mission_side_effect(**kwargs):
+                        store.save_state(
+                            State(
+                                issue_number=6,
+                                pr_number=None,
+                                branch=started_mission.branch,
+                                agent_identity=kwargs["config"].agent_identity,
+                                run_id=kwargs["run_id"],
+                                phase="start",
+                                review_loop_count=0,
+                                retryable_local_only=False,
+                                lease_expires_at=started_mission.lease_expires_at,
+                                last_result="started",
+                                last_error=None,
+                            )
+                        )
+                        return started_mission
+
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    side_effect=start_mission_side_effect,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.build_mission_context",
+                                        return_value=mission_context,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.execute_verification",
+                                            return_value=execution_result,
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.load_publishable_issue_label_names",
+                                                return_value={"shinobi:working"},
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.detect_high_risk_stop",
+                                                    return_value=None,
+                                                ):
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                        return_value=published_mission,
+                                                    ):
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 0)
+            saved_state = store.load_state()
+            self.assertEqual(
+                saved_state.extra["mission_context"]["mission_summary"],
+                "Build run context.",
+            )
+            self.assertEqual(
+                saved_state.extra["mission_context"]["review_note_categories"],
+                ["state-transition", "scope-control"],
+            )
+            self.assertEqual(
+                saved_state.extra["mission_context"]["review_note_entries"]["scope-control"],
+                ["rule b"],
+            )
+
+    def test_run_hands_off_when_context_requires_human_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    mission_context = MissionContext(
+                        issue_number=6,
+                        issue_title="Run start phase",
+                        mission_summary="Broad task.",
+                        completion_criteria=[],
+                        scope_out=[],
+                        reference_files=[".shinobi/summary.md"],
+                        candidate_files=[],
+                        prohibited_actions=[],
+                        summary="",
+                        decisions="",
+                        needs_human_review=True,
+                        needs_human_review_reason="issue body does not name candidate files",
+                    )
+
+                    def start_mission_side_effect(**kwargs):
+                        store.save_state(
+                            State(
+                                issue_number=6,
+                                pr_number=None,
+                                branch=started_mission.branch,
+                                agent_identity=kwargs["config"].agent_identity,
+                                run_id=kwargs["run_id"],
+                                phase="start",
+                                review_loop_count=0,
+                                retryable_local_only=False,
+                                lease_expires_at=started_mission.lease_expires_at,
+                                last_result="started",
+                                last_error=None,
+                            )
+                        )
+                        return started_mission
+
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    side_effect=start_mission_side_effect,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.build_mission_context",
+                                        return_value=mission_context,
+                                    ):
+                                        with patch("shinobi.cli.handoff_started_mission") as handoff_mock:
+                                            with patch("shinobi.cli.publish_mission") as publish_mock:
+                                                with redirect_stdout(output):
+                                                    exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: Shinobi stopped before execute because context phase requires human review",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertIn(
+                "issue body does not name candidate files",
+                handoff_mock.call_args.kwargs["reason"],
+            )
+            publish_mock.assert_not_called()
+
+    def test_run_builds_context_when_resuming_local_only_mission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, _ = store.try_load_config()
+                    self.assertIsNotNone(config)
+                    store.save_state(
+                        State(
+                            issue_number=6,
+                            pr_number=None,
+                            branch="feature/issue-6-run-start-phase",
+                            agent_identity=config.agent_identity,
+                            run_id="previous-run",
+                            phase="start",
+                            review_loop_count=0,
+                            retryable_local_only=True,
+                            lease_expires_at=None,
+                            last_result="start_pending",
+                            last_error="retryable",
+                        )
+                    )
+                    mission_context = MissionContext(
+                        issue_number=6,
+                        issue_title="Run start phase",
+                        mission_summary="Recovered context.",
+                        completion_criteria=["resume context"],
+                        scope_out=[],
+                        reference_files=[".shinobi/summary.md"],
+                        candidate_files=["src/shinobi/cli.py"],
+                        prohibited_actions=[],
+                        summary="",
+                        decisions="",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    published_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        pr_number=31,
+                        pr_url="https://github.com/owner/repo/pull/31",
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    resumed_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch(
+                            "shinobi.cli.recover_local_only_mission_candidate",
+                            return_value=(6, None),
+                        ):
+                            with patch("shinobi.cli.ensure_open_issue", return_value=6):
+                                with patch(
+                                    "shinobi.cli.load_issue",
+                                    return_value={"number": 6, "title": "Run start phase"},
+                                ):
+                                    with patch(
+                                        "shinobi.cli.resume_local_only_mission",
+                                        return_value=resumed_mission,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.build_mission_context",
+                                            return_value=mission_context,
+                                        ) as context_mock:
+                                            with patch(
+                                                "shinobi.cli.execute_verification",
+                                                return_value=execution_result,
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.load_publishable_issue_label_names",
+                                                    return_value={"shinobi:working"},
+                                                ):
+                                                    with patch(
+                                                        "shinobi.cli.detect_high_risk_stop",
+                                                        return_value=None,
+                                                    ):
+                                                        with patch(
+                                                            "shinobi.cli.publish_mission",
+                                                            return_value=published_mission,
+                                                        ):
+                                                            exit_code = cli.main(["run", "--issue", "6"])
+
+            self.assertEqual(exit_code, 0)
+            context_mock.assert_called_once()
+            saved_state = store.load_state()
+            self.assertEqual(
+                saved_state.extra["mission_context"]["mission_summary"],
+                "Recovered context.",
             )
 
     def test_run_hands_off_when_self_review_template_is_invalid(self) -> None:
@@ -7533,7 +7836,58 @@ class ContextBuilderTest(unittest.TestCase):
             context.prohibited_actions,
             ["Do not include: AI 実装エージェント呼び出し"],
         )
+        self.assertEqual(context.review_note_categories, [])
         self.assertFalse(context.needs_human_review)
+
+    def test_build_mission_context_reads_only_two_relevant_review_note_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.review_notes_path.write_text(
+                "# Review Notes\n\n"
+                "## state-transition\n"
+                "- rule: preserve phase labels\n\n"
+                "## cleanup-recovery\n"
+                "- rule: verify stale recovery\n\n"
+                "## test-coverage\n"
+                "- rule: add CI tests\n\n"
+                "## scope-control\n"
+                "- rule: keep candidate files narrow\n\n"
+                "## docs-consistency\n"
+                "- rule: update docs when behavior changes\n",
+                encoding="utf-8",
+            )
+
+            context = build_mission_context(
+                root,
+                {
+                    "number": 64,
+                    "title": "Integrate context phase into shinobi run",
+                    "body": (
+                        "## 対象\n"
+                        "- `src/shinobi/cli.py`\n"
+                        "- `docs/product-spec.md`\n"
+                        "- `docs/architecture.md`\n\n"
+                        "## 要件\n"
+                        "- context phase を run に統合する\n"
+                        "- broad scope 判定を反映する\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(len(context.review_note_categories), 2)
+        self.assertEqual(
+            context.review_note_categories,
+            ["docs-consistency", "scope-control"],
+        )
+        self.assertEqual(
+            context.review_note_entries,
+            {
+                "docs-consistency": ["rule: update docs when behavior changes"],
+                "scope-control": ["rule: keep candidate files narrow"],
+            },
+        )
 
     def test_build_mission_context_treats_missing_knowledge_as_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -237,7 +237,7 @@ shinobi watch
 - review loop
 - merge 判定
 
-実装前には `.shinobi/review-notes.md` 全体を読むのではなく、今回の task に関連するカテゴリだけを確認します。関連カテゴリが不明確な場合でも、確認対象は最大 2 カテゴリまでに抑えます。
+実装前には `.shinobi/review-notes.md` 全体を読むのではなく、今回の task に関連するカテゴリだけを確認します。`shinobi run` の context phase では、その選定結果を local state の構造化 `mission_context` として保持します。関連カテゴリが不明確な場合でも、確認対象は最大 2 カテゴリまでに抑えます。
 
 PR 前セルフレビューでは `.shinobi/templates/self-review.md` を使います。review で新しい指摘を受けた場合は、必要に応じて `.shinobi/templates/review-note-rule.md` に沿って `.shinobi/review-notes.md` へ再発防止ルールを追記します。
 

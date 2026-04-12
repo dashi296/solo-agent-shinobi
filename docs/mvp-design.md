@@ -202,6 +202,7 @@ fatal 時の補償動作:
 - `.shinobi/summary.md` と `.shinobi/decisions.md` を読む
 - `.shinobi/review-notes.md` から今回の task に関連するカテゴリだけを読む
 - エージェントへ渡す実行コンテキストを構築する
+- context 結果を local state の `mission_context` に保持する
 
 設計原則:
 
