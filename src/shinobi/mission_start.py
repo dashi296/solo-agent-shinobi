@@ -103,18 +103,12 @@ def start_mission(
         )
         raise error
 
-    active_state = State(
+    active_state = build_active_start_state(
         issue_number=issue_number,
-        pr_number=None,
         branch=branch,
-        agent_identity=config.agent_identity,
+        config=config,
         run_id=run_id,
-        phase="start",
-        review_loop_count=0,
-        retryable_local_only=False,
         lease_expires_at=lease_expires_at,
-        last_result="started",
-        last_error=None,
     )
     try:
         store.save_state(active_state)
@@ -256,18 +250,12 @@ def resume_local_only_mission(
         )
         raise error
 
-    active_state = State(
+    active_state = build_active_start_state(
         issue_number=issue_number,
-        pr_number=None,
         branch=state.branch,
-        agent_identity=config.agent_identity,
+        config=config,
         run_id=run_id,
-        phase="start",
-        review_loop_count=0,
-        retryable_local_only=False,
         lease_expires_at=lease_expires_at,
-        last_result="started",
-        last_error=None,
     )
     try:
         store.save_state(active_state)
@@ -308,6 +296,29 @@ def resume_local_only_mission(
 def build_branch_name(*, issue_number: int, issue_title: str) -> str:
     slug = slugify_issue_title(issue_title)
     return f"feature/issue-{issue_number}-{slug}"
+
+
+def build_active_start_state(
+    *,
+    issue_number: int,
+    branch: str,
+    config: Config,
+    run_id: str,
+    lease_expires_at: str,
+) -> State:
+    return State(
+        issue_number=issue_number,
+        pr_number=None,
+        branch=branch,
+        agent_identity=config.agent_identity,
+        run_id=run_id,
+        phase="start",
+        review_loop_count=0,
+        retryable_local_only=False,
+        lease_expires_at=lease_expires_at,
+        last_result="started",
+        last_error=None,
+    )
 
 
 def require_startable_issue(issue: dict, config: Config) -> int:
