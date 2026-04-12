@@ -8089,6 +8089,61 @@ class ReviewerTest(unittest.TestCase):
         )
         self.assertEqual(stats.total_changed_lines, 15)
 
+    def test_collect_diff_stats_prefers_remote_base_ref(self) -> None:
+        with patch(
+            "shinobi.reviewer.subprocess.run",
+            return_value=Mock(
+                returncode=0,
+                stdout="12\t3\tsrc/shinobi/reviewer.py\n",
+                stderr="",
+            ),
+        ) as run_mock:
+            stats = collect_diff_stats(Path("/tmp/repo"), base_ref="release/1.0")
+
+        self.assertEqual(
+            stats,
+            DiffStats(
+                changed_files=1,
+                added_lines=12,
+                deleted_lines=3,
+            ),
+        )
+        run_mock.assert_called_once_with(
+            ["git", "diff", "--numstat", "origin/release/1.0...HEAD"],
+            cwd=Path("/tmp/repo"),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_collect_diff_stats_falls_back_to_local_base_ref(self) -> None:
+        with patch(
+            "shinobi.reviewer.subprocess.run",
+            side_effect=[
+                Mock(returncode=1, stdout="", stderr="unknown revision"),
+                Mock(returncode=0, stdout="4\t2\tsrc/shinobi/cli.py\n", stderr=""),
+            ],
+        ) as run_mock:
+            stats = collect_diff_stats(Path("/tmp/repo"), base_ref="release/1.0")
+
+        self.assertEqual(
+            stats,
+            DiffStats(
+                changed_files=1,
+                added_lines=4,
+                deleted_lines=2,
+            ),
+        )
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            ["git", "diff", "--numstat", "origin/release/1.0...HEAD"],
+        )
+        self.assertEqual(
+            run_mock.call_args_list[1].args[0],
+            ["git", "diff", "--numstat", "release/1.0...HEAD"],
+        )
+
     def test_collect_diff_stats_wraps_git_failures(self) -> None:
         with patch(
             "shinobi.reviewer.subprocess.run",
