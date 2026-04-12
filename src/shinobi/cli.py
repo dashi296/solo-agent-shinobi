@@ -697,7 +697,33 @@ def handle_successful_ci_review(
         print(reason)
         return 1
 
-    merge_pull_request(client=client, pr_number=pr_number, config=config)
+    try:
+        merge_pull_request(client=client, pr_number=pr_number, config=config)
+    except MergerError as error:
+        reason = f"Shinobi stopped auto-merge because {error}."
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=build_review_state(
+                state=review_state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=lease_expires_at,
+                last_result="needs-human",
+                last_error=reason,
+                ci_status=ci_status,
+            ),
+            conclusion="needs-human",
+            reason=reason,
+        )
+        print("merge_result: needs-human")
+        print(reason)
+        return 1
+
     finalize_mission(
         root=root,
         store=store,
