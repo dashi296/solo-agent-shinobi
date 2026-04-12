@@ -241,7 +241,7 @@ shinobi watch
 
 PR 前セルフレビューでは `.shinobi/templates/self-review.md` を使います。review で新しい指摘を受けた場合は、必要に応じて `.shinobi/templates/review-note-rule.md` に沿って `.shinobi/review-notes.md` へ再発防止ルールを追記します。
 
-`--issue <id>` を指定した場合は、その Issue を最優先で扱います。resume を許可するのは、その Issue 自身の stale mission で、machine-readable metadata と local state から ownership と phase を復元できる場合に限ります。lease が有効な live mission には別プロセスから attach しません。`.shinobi/run.lock` の owner でない run は live mission の継続に参加せず停止します。別 Issue の active mission や、Shinobi 自身が retryable と記録した local-only mission が残っている場合も横取りせず停止します。
+`--issue <id>` を指定した場合は、その Issue を最優先で扱います。resume を許可するのは、その Issue 自身の stale mission、または branch 実体と retryable 記録で裏付けられたその Issue 自身の local-only mission に限ります。lease が有効な live mission には別プロセスから attach しません。`.shinobi/run.lock` の owner でない run は live mission の継続に参加せず停止します。別 Issue の active mission や、別 Issue に属する retryable local-only mission が残っている場合は横取りせず停止します。
 
 実装順序としては、run 開始時にまず `.shinobi/run.lock` を確認します。他 owner の stale でない lock が見つかった場合は、その workspace で live run が進行中とみなして停止します。stale lock を見つけた場合は、run は select phase 内でその lock を明示的に takeover してから recovery / cleanup を行えます。lock が存在しない場合は、その run 自身が select phase で live run 用の lock を取得してから stale mission の recovery / cleanup を進めます。`start` では、同じ lock ownership を維持したまま branch 作成と state 更新へ進みます。
 

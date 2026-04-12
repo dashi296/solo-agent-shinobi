@@ -199,12 +199,142 @@ def handoff_started_mission(
     )
 
 
+def resume_local_only_mission(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    issue: dict,
+    state: State,
+    now: datetime | None = None,
+) -> StartedMission:
+    started_at = now or datetime.now(timezone.utc)
+    issue_number = require_resumable_local_only_issue(issue, config)
+    if state.issue_number != issue_number:
+        raise MissionStartError(
+            "retryable local-only state issue does not match requested issue "
+            f"(state: {state.issue_number}, issue: {issue_number})"
+        )
+    if not state.branch:
+        raise MissionStartError(
+            f"retryable local-only mission for issue #{issue_number} is missing branch"
+        )
+
+    store.require_lock_owner(run_id, config.agent_identity)
+    lease_expires_at = store.format_timestamp(
+        started_at + timedelta(minutes=config.mission_lease_minutes)
+    )
+    issue_label_names = get_issue_label_names(issue)
+
+    try:
+        sync_start_labels(root, issue_number, config, issue_label_names=issue_label_names)
+    except MissionStartError as error:
+        state.last_error = str(error)
+        save_retryable_state_or_raise(
+            store=store,
+            state=state,
+            base_message=str(error),
+        )
+        raise error
+
+    try:
+        post_start_comment(
+            root=root,
+            issue_number=issue_number,
+            branch=state.branch,
+            lease_expires_at=lease_expires_at,
+            config=config,
+            run_id=run_id,
+        )
+    except MissionStartError as error:
+        state.last_error = str(error)
+        save_retryable_state_or_raise(
+            store=store,
+            state=state,
+            base_message=str(error),
+        )
+        raise error
+
+    active_state = State(
+        issue_number=issue_number,
+        pr_number=None,
+        branch=state.branch,
+        agent_identity=config.agent_identity,
+        run_id=run_id,
+        phase="start",
+        review_loop_count=0,
+        retryable_local_only=False,
+        lease_expires_at=lease_expires_at,
+        last_result="started",
+        last_error=None,
+    )
+    try:
+        store.save_state(active_state)
+    except OSError as error:
+        rollback_error = transition_issue_to_needs_human(
+            root=root,
+            issue_number=issue_number,
+            config=config,
+            reason=(
+                "Shinobi failed to persist final local state while resuming a local-only "
+                f"mission after updating active labels: {error}"
+            ),
+            known_label_names={config.labels["working"]},
+        )
+        state.last_error = (
+            "GitHub labels were updated but final local state persistence failed while "
+            f"resuming local-only mission: {error}"
+        )
+        if rollback_error is not None:
+            state.last_error += f"; rollback also failed: {rollback_error}"
+        failure_message = format_final_state_persistence_failure(
+            issue_number, error, rollback_error
+        )
+        save_retryable_state_or_raise(
+            store=store,
+            state=state,
+            base_message=failure_message,
+        )
+        raise MissionStartError(failure_message) from error
+
+    return StartedMission(
+        issue_number=issue_number,
+        branch=state.branch,
+        lease_expires_at=lease_expires_at,
+    )
+
+
 def build_branch_name(*, issue_number: int, issue_title: str) -> str:
     slug = slugify_issue_title(issue_title)
     return f"feature/issue-{issue_number}-{slug}"
 
 
 def require_startable_issue(issue: dict, config: Config) -> int:
+    return require_issue_with_allowed_status_labels(
+        issue,
+        config,
+        allowed_status_labels={config.labels["ready"]},
+        error_context="start",
+    )
+
+
+def require_resumable_local_only_issue(issue: dict, config: Config) -> int:
+    return require_issue_with_allowed_status_labels(
+        issue,
+        config,
+        allowed_status_labels={config.labels["ready"], config.labels["working"]},
+        error_context="resume local-only mission",
+    )
+
+
+def require_issue_with_allowed_status_labels(
+    issue: dict,
+    config: Config,
+    *,
+    allowed_status_labels: set[str],
+    error_context: str,
+) -> int:
     issue_number = int(issue["number"])
     if "pull_request" in issue:
         raise MissionStartError(f"issue #{issue_number} is a pull request, not an issue")
@@ -217,9 +347,15 @@ def require_startable_issue(issue: dict, config: Config) -> int:
         for label in issue.get("labels", [])
         if isinstance(label, dict)
     }
-    ready_label = config.labels["ready"]
-    if ready_label not in label_names:
-        raise MissionStartError(f"issue #{issue_number} is not labeled {ready_label}")
+    if not any(label in label_names for label in allowed_status_labels):
+        if len(allowed_status_labels) == 1:
+            expected_label = next(iter(allowed_status_labels))
+            raise MissionStartError(f"issue #{issue_number} is not labeled {expected_label}")
+        allowed = ", ".join(sorted(allowed_status_labels))
+        raise MissionStartError(
+            f"issue #{issue_number} is not in a {error_context} state; "
+            f"expected one of: {allowed}"
+        )
 
     blocked_label = config.labels["blocked"]
     needs_human_label = config.labels["needs_human"]

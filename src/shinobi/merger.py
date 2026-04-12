@@ -68,6 +68,12 @@ def evaluate_merge(
             f"{diff_stats.total_changed_lines} exceed max_lines_changed {config.max_lines_changed}"
         )
 
+    if state.review_loop_count >= config.max_review_loops:
+        reasons.append(
+            "review loop count "
+            f"{state.review_loop_count} reached max_review_loops {config.max_review_loops}"
+        )
+
     conclusion = "blocked" if config.labels["blocked"] in blocking_labels else "needs-human"
     return MergeDecision(should_merge=not reasons, reasons=reasons, conclusion=conclusion)
 
