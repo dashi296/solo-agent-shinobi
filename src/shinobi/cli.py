@@ -1682,7 +1682,10 @@ def stale_active_mission_recovery_error(
             f"({current_branch_label} != {branch})"
         )
 
-    pr_number = parse_optional_mission_pr_number(mission_fields.get("pr"))
+    try:
+        pr_number = parse_optional_mission_pr_number(mission_fields.get("pr"))
+    except ValueError as error:
+        return str(error)
     if phase in {"publish", "review"} and pr_number is None:
         return f"mission-state phase {phase} requires pr"
     return None
