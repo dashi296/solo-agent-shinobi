@@ -75,6 +75,9 @@ def merge_pull_request(
     config: Config,
 ) -> None:
     try:
+        pull_request = client.get_pull_request(str(pr_number))
+        if pull_request.get("isDraft"):
+            client.convert_pull_request_to_ready(pr_number)
         client.merge_pull_request(
             pr_number,
             merge_method=config.merge_method,

@@ -28,7 +28,7 @@ from shinobi.executor import (
     run_verification_command,
 )
 from shinobi.github_client import GitHubClient, GitHubClientError
-from shinobi.merger import MergeDecision, evaluate_merge
+from shinobi.merger import MergeDecision, MergerError, evaluate_merge, merge_pull_request
 from shinobi.mission_finalize import (
     MissionFinalizeError,
     finalize_mission,
@@ -571,6 +571,14 @@ class CliTest(unittest.TestCase):
                         "state": "OPEN",
                         "labels": [{"name": config.labels["reviewing"]}],
                     }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": True,
+                    }
+                    client.convert_pull_request_to_ready.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                    }
                     with patch("shinobi.cli.GitHubClient", return_value=client):
                         with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
                             with patch(
@@ -621,6 +629,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(client.update_issue_comment.call_count, 2)
             self.assertIn("phase: review", client.update_issue_comment.call_args_list[0].args[1])
             self.assertIn("pr: 44", client.update_issue_comment.call_args_list[0].args[1])
+            client.get_pull_request.assert_called_once_with("44")
+            client.convert_pull_request_to_ready.assert_called_once_with(44)
             client.merge_pull_request.assert_called_once_with(
                 44,
                 merge_method=config.merge_method,
@@ -6948,6 +6958,47 @@ class ReviewerTest(unittest.TestCase):
                 ],
             ),
         )
+
+    def test_merge_pull_request_marks_draft_pr_ready_before_merging(self) -> None:
+        client = Mock()
+        config = Config(repo="owner/repo", merge_method="squash")
+        client.get_pull_request.return_value = {
+            "number": 44,
+            "isDraft": True,
+        }
+        client.convert_pull_request_to_ready.return_value = {
+            "number": 44,
+            "isDraft": False,
+        }
+
+        merge_pull_request(client=client, pr_number=44, config=config)
+
+        client.get_pull_request.assert_called_once_with("44")
+        client.convert_pull_request_to_ready.assert_called_once_with(44)
+        client.merge_pull_request.assert_called_once_with(
+            44,
+            merge_method="squash",
+            delete_branch=True,
+        )
+
+    def test_merge_pull_request_wraps_ready_transition_failure(self) -> None:
+        client = Mock()
+        config = Config(repo="owner/repo", merge_method="squash")
+        client.get_pull_request.return_value = {
+            "number": 44,
+            "isDraft": True,
+        }
+        client.convert_pull_request_to_ready.side_effect = GitHubClientError(
+            "draft pull requests cannot be merged"
+        )
+
+        with self.assertRaisesRegex(
+            MergerError,
+            "failed to merge PR #44: draft pull requests cannot be merged",
+        ):
+            merge_pull_request(client=client, pr_number=44, config=config)
+
+        client.merge_pull_request.assert_not_called()
 
     def test_collect_ci_status_classifies_checks(self) -> None:
         client = Mock()
