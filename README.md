@@ -75,7 +75,7 @@ shinobi run --issue 123
 shinobi review
 ```
 
-`watch` や merge などの後続コマンドは将来候補です。
+`watch` などの後続コマンドは将来候補です。
 
 現在の実装では foundations に加えて、`shinobi run` / `shinobi run --issue <id>` の select / start / publish phase と、`shinobi review` の CI polling / retry / auto-merge 判定が動作します。Issue 選択、`.shinobi/run.lock` によるローカル排他、`feature/issue-<id>-<slug>` branch 作成、start 用の machine-readable comment 投稿、検証コマンド実行、branch push、draft PR 作成または更新、publish 用の label / mission-state comment 更新、review phase の CI 待機、retry state 保存、安全条件を満たす PR の squash merge と finalize まで実装済みです。context builder の run phase 統合と、AI による review loop の自動修正は未実装です。
 

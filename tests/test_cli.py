@@ -6952,10 +6952,37 @@ class ReviewerTest(unittest.TestCase):
                     "auto_merge is disabled in config",
                     "CI status is failure, not success",
                     "issue #34 has label shinobi:risky, requiring human merge",
-                    "review loop count 2 reached max_review_loops 2",
                     "changed files 5 exceed max_changed_files 4",
                     "total changed lines 16 exceed max_lines_changed 10",
                 ],
+            ),
+        )
+
+    def test_evaluate_merge_allows_success_after_retry_limit_is_reached(self) -> None:
+        config = Config(
+            repo="owner/repo",
+            max_review_loops=2,
+        )
+
+        decision = evaluate_merge(
+            config=config,
+            state=State(review_loop_count=2),
+            issue={
+                "number": 34,
+                "labels": [{"name": "shinobi:reviewing"}],
+            },
+            ci_status=CIStatus(
+                checks=[PullRequestCheck(name="test", state="SUCCESS", bucket="pass")],
+                status="success",
+            ),
+            diff_stats=DiffStats(changed_files=1, added_lines=2, deleted_lines=1),
+        )
+
+        self.assertEqual(
+            decision,
+            MergeDecision(
+                should_merge=True,
+                reasons=[],
             ),
         )
 
