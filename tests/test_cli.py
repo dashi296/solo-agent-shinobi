@@ -28,6 +28,7 @@ from shinobi.executor import (
     run_verification_command,
 )
 from shinobi.github_client import GitHubClient, GitHubClientError
+from shinobi.merger import MergeDecision, MergerError, evaluate_merge, merge_pull_request
 from shinobi.mission_finalize import (
     MissionFinalizeError,
     finalize_mission,
@@ -528,7 +529,7 @@ class CliTest(unittest.TestCase):
             self.assertFalse(store.paths.decisions_path.exists())
             self.assertFalse(store.paths.lock_path.exists())
 
-    def test_review_waits_for_ci_and_persists_review_state(self) -> None:
+    def test_review_waits_for_ci_merges_and_finalizes_when_auto_merge_is_safe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
@@ -566,30 +567,62 @@ class CliTest(unittest.TestCase):
                             ),
                         }
                     ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": True,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "release/1.0",
+                    }
+                    client.convert_pull_request_to_ready.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                    }
                     with patch("shinobi.cli.GitHubClient", return_value=client):
-                        with patch(
-                            "shinobi.cli.wait_for_ci",
-                            return_value=CIStatus(
-                                checks=[
-                                    PullRequestCheck(
-                                        name="test",
-                                        state="SUCCESS",
-                                        bucket="pass",
-                                    )
-                                ],
-                                status="success",
-                            ),
-                        ) as wait_for_ci_mock:
-                            with redirect_stdout(output):
-                                exit_code = cli.main(
-                                    [
-                                        "review",
-                                        "--timeout-seconds",
-                                        "30",
-                                        "--poll-interval-seconds",
-                                        "5",
-                                    ]
-                                )
+                        with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
+                            with patch(
+                                "shinobi.cli.collect_diff_stats",
+                                return_value=DiffStats(
+                                    changed_files=2,
+                                    added_lines=10,
+                                    deleted_lines=3,
+                                ),
+                            ) as collect_diff_stats_mock:
+                                with patch(
+                                    "shinobi.cli.collect_paths_against_base_ref",
+                                    return_value=["src/shinobi/cli.py"],
+                                ):
+                                    with patch(
+                                        "shinobi.cli.wait_for_ci",
+                                        return_value=CIStatus(
+                                            checks=[
+                                                PullRequestCheck(
+                                                    name="test",
+                                                    state="SUCCESS",
+                                                    bucket="pass",
+                                                )
+                                            ],
+                                            status="success",
+                                        ),
+                                    ) as wait_for_ci_mock:
+                                        with patch(
+                                            "shinobi.cli.load_current_branch",
+                                            return_value="feature/issue-33-review-ci",
+                                        ):
+                                            with redirect_stdout(output):
+                                                exit_code = cli.main(
+                                                    [
+                                                        "review",
+                                                        "--timeout-seconds",
+                                                        "30",
+                                                        "--poll-interval-seconds",
+                                                        "5",
+                                                    ]
+                                                )
 
             self.assertEqual(exit_code, 0)
             rendered = output.getvalue()
@@ -597,24 +630,547 @@ class CliTest(unittest.TestCase):
             self.assertIn("review_pr: #44", rendered)
             self.assertIn("ci_status: success", rendered)
             self.assertIn("ci_checks: test=pass", rendered)
+            self.assertIn("merge_result: merged (squash)", rendered)
             wait_for_ci_mock.assert_called_once()
             self.assertIs(wait_for_ci_mock.call_args.args[0], client)
             self.assertEqual(wait_for_ci_mock.call_args.args[1], 44)
             self.assertEqual(wait_for_ci_mock.call_args.kwargs["timeout_seconds"], 30.0)
             self.assertEqual(wait_for_ci_mock.call_args.kwargs["poll_interval_seconds"], 5.0)
             self.assertIsNotNone(wait_for_ci_mock.call_args.kwargs["heartbeat"])
+            collect_diff_stats_mock.assert_called_once_with(root, base_ref="release/1.0")
             self.assertEqual(client.update_issue_comment.call_count, 2)
             self.assertIn("phase: review", client.update_issue_comment.call_args_list[0].args[1])
             self.assertIn("pr: 44", client.update_issue_comment.call_args_list[0].args[1])
+            client.get_pull_request.assert_called_once_with("44")
+            client.convert_pull_request_to_ready.assert_called_once_with(44)
+            client.merge_pull_request.assert_called_once_with(
+                44,
+                merge_method=config.merge_method,
+                delete_branch=True,
+            )
+            client.update_issue_labels.assert_any_call(33, add=[config.labels["merged"]])
+            client.update_issue_labels.assert_any_call(33, remove=[config.labels["reviewing"]])
+            client.close_issue.assert_called_once_with(33)
 
             saved_state = store.load_state()
-            self.assertEqual(saved_state.phase, "review")
-            self.assertEqual(saved_state.run_id, "publish-run")
-            self.assertEqual(saved_state.last_result, "ci-success")
-            self.assertIsNone(saved_state.last_error)
-            self.assertEqual(saved_state.extra["ci_status"]["status"], "success")
-            self.assertFalse(saved_state.extra["ci_status"]["timed_out"])
-            self.assertEqual(saved_state.extra["ci_status"]["checks"][0]["name"], "test")
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "merged")
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.pr_number, 44)
+            self.assertEqual(saved_state.last_mission.conclusion, "merged")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_successful_ci_finalizes_needs_human_when_merge_is_ineligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [
+                            {"name": config.labels["reviewing"]},
+                            {"name": config.labels["risky"]},
+                        ],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
+                            with patch(
+                                "shinobi.cli.collect_diff_stats",
+                                return_value=DiffStats(
+                                    changed_files=2,
+                                    added_lines=10,
+                                    deleted_lines=3,
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.collect_paths_against_base_ref",
+                                    return_value=["src/shinobi/cli.py"],
+                                ):
+                                    with patch(
+                                        "shinobi.cli.wait_for_ci",
+                                        return_value=CIStatus(
+                                            checks=[
+                                                PullRequestCheck(
+                                                    name="test",
+                                                    state="SUCCESS",
+                                                    bucket="pass",
+                                                )
+                                            ],
+                                            status="success",
+                                        ),
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_current_branch",
+                                            return_value="feature/issue-33-review-ci",
+                                        ):
+                                            with redirect_stdout(output):
+                                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("merge_result: needs-human", rendered)
+            self.assertIn("has label shinobi:risky", rendered)
+            client.merge_pull_request.assert_not_called()
+            client.update_issue_labels.assert_any_call(33, add=[config.labels["needs_human"]])
+            client.update_issue_labels.assert_any_call(33, remove=[config.labels["reviewing"]])
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_successful_ci_preserves_blocked_handoff_when_issue_is_human_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [
+                            {"name": config.labels["reviewing"]},
+                            {"name": config.labels["blocked"]},
+                        ],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
+                            with patch(
+                                "shinobi.cli.collect_diff_stats",
+                                return_value=DiffStats(
+                                    changed_files=2,
+                                    added_lines=10,
+                                    deleted_lines=3,
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.collect_paths_against_base_ref",
+                                    return_value=["src/shinobi/cli.py"],
+                                ):
+                                    with patch(
+                                        "shinobi.cli.wait_for_ci",
+                                        return_value=CIStatus(
+                                            checks=[
+                                                PullRequestCheck(
+                                                    name="test",
+                                                    state="SUCCESS",
+                                                    bucket="pass",
+                                                )
+                                            ],
+                                            status="success",
+                                        ),
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_current_branch",
+                                            return_value="feature/issue-33-review-ci",
+                                        ):
+                                            with redirect_stdout(output):
+                                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("merge_result: blocked", rendered)
+            self.assertIn(f"has blocking label(s): {config.labels['blocked']}", rendered)
+            client.merge_pull_request.assert_not_called()
+            client.update_issue_labels.assert_any_call(33, add=[config.labels["blocked"]])
+            client.update_issue_labels.assert_any_call(33, remove=[config.labels["reviewing"]])
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "blocked")
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.conclusion, "blocked")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_successful_ci_stops_merge_for_high_risk_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
+                            with patch(
+                                "shinobi.cli.collect_diff_stats",
+                                return_value=DiffStats(
+                                    changed_files=2,
+                                    added_lines=10,
+                                    deleted_lines=3,
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.collect_paths_against_base_ref",
+                                    return_value=["auth/login.py", "src/shinobi/cli.py"],
+                                ):
+                                    with patch(
+                                        "shinobi.cli.wait_for_ci",
+                                        return_value=CIStatus(
+                                            checks=[
+                                                PullRequestCheck(
+                                                    name="test",
+                                                    state="SUCCESS",
+                                                    bucket="pass",
+                                                )
+                                            ],
+                                            status="success",
+                                        ),
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_current_branch",
+                                            return_value="feature/issue-33-review-ci",
+                                        ):
+                                            with redirect_stdout(output):
+                                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("merge_result: needs-human", rendered)
+            self.assertIn(
+                "changed files match high-risk path(s): auth/ (files: auth/login.py)",
+                rendered,
+            )
+            client.merge_pull_request.assert_not_called()
+            client.update_issue_labels.assert_any_call(33, add=[config.labels["needs_human"]])
+            client.update_issue_labels.assert_any_call(33, remove=[config.labels["reviewing"]])
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_successful_ci_finalizes_needs_human_when_merge_command_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
+                    }
+                    client.merge_pull_request.side_effect = GitHubClientError(
+                        "merge blocked by branch protection"
+                    )
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
+                            with patch(
+                                "shinobi.cli.collect_diff_stats",
+                                return_value=DiffStats(
+                                    changed_files=2,
+                                    added_lines=10,
+                                    deleted_lines=3,
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.collect_paths_against_base_ref",
+                                    return_value=["src/shinobi/cli.py"],
+                                ):
+                                    with patch(
+                                        "shinobi.cli.wait_for_ci",
+                                        return_value=CIStatus(
+                                            checks=[
+                                                PullRequestCheck(
+                                                    name="test",
+                                                    state="SUCCESS",
+                                                    bucket="pass",
+                                                )
+                                            ],
+                                            status="success",
+                                        ),
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_current_branch",
+                                            return_value="feature/issue-33-review-ci",
+                                        ):
+                                            with redirect_stdout(output):
+                                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("merge_result: needs-human", rendered)
+            self.assertIn("failed to merge PR #44", rendered)
+            self.assertIn("branch protection", rendered)
+            client.update_issue_labels.assert_any_call(33, add=[config.labels["needs_human"]])
+            client.update_issue_labels.assert_any_call(33, remove=[config.labels["reviewing"]])
+            client.close_issue.assert_not_called()
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.pr_number, 44)
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_persists_merged_state_when_finalize_fails_after_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.collect_diff_stats",
+                            return_value=DiffStats(
+                                changed_files=2,
+                                added_lines=10,
+                                deleted_lines=3,
+                            ),
+                        ):
+                            with patch(
+                                "shinobi.cli.collect_paths_against_base_ref",
+                                return_value=["src/shinobi/cli.py"],
+                            ):
+                                with patch(
+                                    "shinobi.cli.wait_for_ci",
+                                    return_value=CIStatus(
+                                        checks=[
+                                            PullRequestCheck(
+                                                name="test",
+                                                state="SUCCESS",
+                                                bucket="pass",
+                                            )
+                                        ],
+                                        status="success",
+                                    ),
+                                ):
+                                    with patch(
+                                        "shinobi.cli.load_current_branch",
+                                        return_value="feature/issue-33-review-ci",
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.finalize_mission",
+                                            side_effect=MissionFinalizeError(
+                                                "failed to create finalize comment on issue #33: api unavailable"
+                                            ),
+                                        ):
+                                            with redirect_stdout(output):
+                                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("merge_result: merged (squash)", rendered)
+            self.assertIn("merge_warning: merged PR but finalize follow-up failed", rendered)
+            client.merge_pull_request.assert_called_once_with(
+                44,
+                merge_method=config.merge_method,
+                delete_branch=True,
+            )
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "merged")
+            self.assertIn("merged PR but finalize follow-up failed", saved_state.last_error)
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.pr_number, 44)
+            self.assertEqual(saved_state.last_mission.conclusion, "merged")
             self.assertIsNone(store.load_lock())
 
     def test_review_timeout_returns_nonzero_and_persists_pending_result(self) -> None:
@@ -670,8 +1226,12 @@ class CliTest(unittest.TestCase):
                                 timed_out=True,
                             ),
                         ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["review"])
+                            with patch(
+                                "shinobi.cli.load_current_branch",
+                                return_value="feature/issue-33-review-ci",
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -723,6 +1283,17 @@ class CliTest(unittest.TestCase):
                             ),
                         }
                     ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
+                    }
 
                     def wait_for_ci_side_effect(*_args, **kwargs):
                         kwargs["heartbeat"]()
@@ -739,11 +1310,31 @@ class CliTest(unittest.TestCase):
 
                     with patch("shinobi.cli.GitHubClient", return_value=client):
                         with patch(
-                            "shinobi.cli.wait_for_ci",
-                            side_effect=wait_for_ci_side_effect,
+                            "shinobi.mission_finalize.GitHubClient",
+                            return_value=client,
                         ):
-                            with redirect_stdout(io.StringIO()):
-                                exit_code = cli.main(["review"])
+                            with patch(
+                                "shinobi.cli.collect_diff_stats",
+                                return_value=DiffStats(
+                                    changed_files=2,
+                                    added_lines=10,
+                                    deleted_lines=3,
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.collect_paths_against_base_ref",
+                                    return_value=["src/shinobi/cli.py"],
+                                ):
+                                    with patch(
+                                        "shinobi.cli.wait_for_ci",
+                                        side_effect=wait_for_ci_side_effect,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.load_current_branch",
+                                            return_value="feature/issue-33-review-ci",
+                                        ):
+                                            with redirect_stdout(io.StringIO()):
+                                                exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(client.update_issue_comment.call_count, 3)
@@ -820,8 +1411,12 @@ class CliTest(unittest.TestCase):
                                 "shinobi.cli.execute_verification",
                                 return_value=execution_result,
                             ) as execute_verification_mock:
-                                with redirect_stdout(output):
-                                    exit_code = cli.main(["review"])
+                                with patch(
+                                    "shinobi.cli.load_current_branch",
+                                    return_value="feature/issue-33-review-ci",
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -907,8 +1502,12 @@ class CliTest(unittest.TestCase):
                                     status="failure",
                                 ),
                             ):
-                                with redirect_stdout(output):
-                                    exit_code = cli.main(["review"])
+                                with patch(
+                                    "shinobi.cli.load_current_branch",
+                                    return_value="feature/issue-33-review-ci",
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -1097,8 +1696,12 @@ class CliTest(unittest.TestCase):
                                     "shinobi.cli.execute_verification",
                                     return_value=execution_result,
                                 ) as execute_verification_mock:
-                                    with redirect_stdout(output):
-                                        exit_code = cli.main(["review"])
+                                    with patch(
+                                        "shinobi.cli.load_current_branch",
+                                        return_value="feature/issue-33-review-ci",
+                                    ):
+                                        with redirect_stdout(output):
+                                            exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             rendered = output.getvalue()
@@ -1166,8 +1769,12 @@ class CliTest(unittest.TestCase):
                             "shinobi.cli.wait_for_ci",
                             side_effect=ReviewerError("api unavailable"),
                         ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["review"])
+                            with patch(
+                                "shinobi.cli.load_current_branch",
+                                return_value="feature/issue-33-review-ci",
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn("review aborted: api unavailable", output.getvalue())
@@ -1235,8 +1842,12 @@ class CliTest(unittest.TestCase):
                                 status="success",
                             ),
                         ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["review"])
+                            with patch(
+                                "shinobi.cli.load_current_branch",
+                                return_value="feature/issue-33-review-ci",
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["review"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
@@ -1323,6 +1934,144 @@ class CliTest(unittest.TestCase):
                 output.getvalue(),
             )
             client.assert_not_called()
+            self.assertIsNone(store.load_lock())
+
+    def test_review_aborts_when_current_branch_does_not_match_mission_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="publish",
+                            last_result="published",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch("shinobi.cli.load_current_branch", return_value="main"):
+                            with redirect_stdout(output):
+                                exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: current git branch main does not match mission branch "
+                "feature/issue-33-review-ci",
+                output.getvalue(),
+            )
+            client.assert_not_called()
+            self.assertEqual(store.load_state().phase, "publish")
+            self.assertEqual(store.load_state().last_result, "published")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_aborts_when_pr_head_does_not_match_mission_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/unexpected-head",
+                        "baseRefName": "main",
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.collect_diff_stats",
+                            return_value=DiffStats(
+                                changed_files=2,
+                                added_lines=10,
+                                deleted_lines=3,
+                            ),
+                        ) as collect_diff_stats_mock:
+                            with patch(
+                                "shinobi.cli.wait_for_ci",
+                                return_value=CIStatus(
+                                    checks=[
+                                        PullRequestCheck(
+                                            name="test",
+                                            state="SUCCESS",
+                                            bucket="pass",
+                                        )
+                                    ],
+                                    status="success",
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.load_current_branch",
+                                    return_value="feature/issue-33-review-ci",
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: PR #44 head branch feature/unexpected-head "
+                "does not match mission branch feature/issue-33-review-ci",
+                output.getvalue(),
+            )
+            collect_diff_stats_mock.assert_not_called()
+            client.merge_pull_request.assert_not_called()
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.last_result, "review-error")
+            self.assertEqual(
+                saved_state.last_error,
+                "PR #44 head branch feature/unexpected-head "
+                "does not match mission branch feature/issue-33-review-ci",
+            )
             self.assertIsNone(store.load_lock())
 
     def test_review_rejects_invalid_poll_interval_before_side_effects(self) -> None:
@@ -7340,6 +8089,61 @@ class ReviewerTest(unittest.TestCase):
         )
         self.assertEqual(stats.total_changed_lines, 15)
 
+    def test_collect_diff_stats_prefers_remote_base_ref(self) -> None:
+        with patch(
+            "shinobi.reviewer.subprocess.run",
+            return_value=Mock(
+                returncode=0,
+                stdout="12\t3\tsrc/shinobi/reviewer.py\n",
+                stderr="",
+            ),
+        ) as run_mock:
+            stats = collect_diff_stats(Path("/tmp/repo"), base_ref="release/1.0")
+
+        self.assertEqual(
+            stats,
+            DiffStats(
+                changed_files=1,
+                added_lines=12,
+                deleted_lines=3,
+            ),
+        )
+        run_mock.assert_called_once_with(
+            ["git", "diff", "--numstat", "origin/release/1.0...HEAD"],
+            cwd=Path("/tmp/repo"),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_collect_diff_stats_falls_back_to_local_base_ref(self) -> None:
+        with patch(
+            "shinobi.reviewer.subprocess.run",
+            side_effect=[
+                Mock(returncode=1, stdout="", stderr="unknown revision"),
+                Mock(returncode=0, stdout="4\t2\tsrc/shinobi/cli.py\n", stderr=""),
+            ],
+        ) as run_mock:
+            stats = collect_diff_stats(Path("/tmp/repo"), base_ref="release/1.0")
+
+        self.assertEqual(
+            stats,
+            DiffStats(
+                changed_files=1,
+                added_lines=4,
+                deleted_lines=2,
+            ),
+        )
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(
+            run_mock.call_args_list[0].args[0],
+            ["git", "diff", "--numstat", "origin/release/1.0...HEAD"],
+        )
+        self.assertEqual(
+            run_mock.call_args_list[1].args[0],
+            ["git", "diff", "--numstat", "release/1.0...HEAD"],
+        )
+
     def test_collect_diff_stats_wraps_git_failures(self) -> None:
         with patch(
             "shinobi.reviewer.subprocess.run",
@@ -7391,6 +8195,142 @@ class ReviewerTest(unittest.TestCase):
                 "review loop count 2 reached max_review_loops 2",
             ],
         )
+
+    def test_evaluate_merge_stops_for_ci_risk_and_size_limits(self) -> None:
+        config = Config(
+            repo="owner/repo",
+            auto_merge=False,
+            max_changed_files=4,
+            max_lines_changed=10,
+            max_review_loops=2,
+        )
+
+        decision = evaluate_merge(
+            config=config,
+            state=State(review_loop_count=2),
+            issue={
+                "number": 34,
+                "labels": [{"name": "shinobi:risky"}],
+            },
+            ci_status=CIStatus(
+                checks=[PullRequestCheck(name="test", state="FAILURE", bucket="fail")],
+                status="failure",
+            ),
+            diff_stats=DiffStats(changed_files=5, added_lines=7, deleted_lines=9),
+        )
+
+        self.assertEqual(
+            decision,
+            MergeDecision(
+                should_merge=False,
+                reasons=[
+                    "auto_merge is disabled in config",
+                    "CI status is failure, not success",
+                    "issue #34 has label shinobi:risky, requiring human merge",
+                    "changed files 5 exceed max_changed_files 4",
+                    "total changed lines 16 exceed max_lines_changed 10",
+                    "review loop count 2 reached max_review_loops 2",
+                ],
+            ),
+        )
+
+    def test_evaluate_merge_stops_for_human_stop_labels(self) -> None:
+        config = Config(repo="owner/repo")
+
+        decision = evaluate_merge(
+            config=config,
+            state=State(review_loop_count=0),
+            issue={
+                "number": 34,
+                "labels": [
+                    {"name": "shinobi:reviewing"},
+                    {"name": "shinobi:blocked"},
+                ],
+            },
+            ci_status=CIStatus(
+                checks=[PullRequestCheck(name="test", state="SUCCESS", bucket="pass")],
+                status="success",
+            ),
+            diff_stats=DiffStats(changed_files=1, added_lines=2, deleted_lines=1),
+        )
+
+        self.assertEqual(
+            decision,
+            MergeDecision(
+                should_merge=False,
+                reasons=["issue #34 has blocking label(s): shinobi:blocked"],
+                conclusion="blocked",
+            ),
+        )
+
+    def test_evaluate_merge_stops_after_retry_limit_is_reached(self) -> None:
+        config = Config(
+            repo="owner/repo",
+            max_review_loops=2,
+        )
+
+        decision = evaluate_merge(
+            config=config,
+            state=State(review_loop_count=2),
+            issue={
+                "number": 34,
+                "labels": [{"name": "shinobi:reviewing"}],
+            },
+            ci_status=CIStatus(
+                checks=[PullRequestCheck(name="test", state="SUCCESS", bucket="pass")],
+                status="success",
+            ),
+            diff_stats=DiffStats(changed_files=1, added_lines=2, deleted_lines=1),
+        )
+
+        self.assertEqual(
+            decision,
+            MergeDecision(
+                should_merge=False,
+                reasons=["review loop count 2 reached max_review_loops 2"],
+            ),
+        )
+
+    def test_merge_pull_request_marks_draft_pr_ready_before_merging(self) -> None:
+        client = Mock()
+        config = Config(repo="owner/repo", merge_method="squash")
+        client.get_pull_request.return_value = {
+            "number": 44,
+            "isDraft": True,
+        }
+        client.convert_pull_request_to_ready.return_value = {
+            "number": 44,
+            "isDraft": False,
+        }
+
+        merge_pull_request(client=client, pr_number=44, config=config)
+
+        client.get_pull_request.assert_called_once_with("44")
+        client.convert_pull_request_to_ready.assert_called_once_with(44)
+        client.merge_pull_request.assert_called_once_with(
+            44,
+            merge_method="squash",
+            delete_branch=True,
+        )
+
+    def test_merge_pull_request_wraps_ready_transition_failure(self) -> None:
+        client = Mock()
+        config = Config(repo="owner/repo", merge_method="squash")
+        client.get_pull_request.return_value = {
+            "number": 44,
+            "isDraft": True,
+        }
+        client.convert_pull_request_to_ready.side_effect = GitHubClientError(
+            "draft pull requests cannot be merged"
+        )
+
+        with self.assertRaisesRegex(
+            MergerError,
+            "failed to merge PR #44: draft pull requests cannot be merged",
+        ):
+            merge_pull_request(client=client, pr_number=44, config=config)
+
+        client.merge_pull_request.assert_not_called()
 
     def test_collect_ci_status_classifies_checks(self) -> None:
         client = Mock()

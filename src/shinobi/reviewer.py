@@ -36,6 +36,31 @@ FAILURE_CHECK_STATES = {
 
 
 def collect_diff_stats(root: Path, *, base_ref: str) -> DiffStats:
+    errors: list[str] = []
+    for candidate_ref in diff_base_ref_candidates(base_ref):
+        try:
+            return collect_diff_stats_against_ref(root, base_ref=candidate_ref)
+        except ReviewerError as error:
+            error_message = str(error)
+            errors.append(error_message)
+            if not is_missing_revision_error(error_message):
+                break
+
+    joined_errors = "; ".join(errors)
+    raise ReviewerError(joined_errors)
+
+
+def diff_base_ref_candidates(base_ref: str) -> list[str]:
+    if base_ref.startswith("origin/"):
+        return [base_ref]
+
+    remote_candidate = f"origin/{base_ref}"
+    if remote_candidate == base_ref:
+        return [base_ref]
+    return [remote_candidate, base_ref]
+
+
+def collect_diff_stats_against_ref(root: Path, *, base_ref: str) -> DiffStats:
     try:
         result = subprocess.run(
             ["git", "diff", "--numstat", f"{base_ref}...HEAD"],
@@ -52,6 +77,11 @@ def collect_diff_stats(root: Path, *, base_ref: str) -> DiffStats:
         raise ReviewerError(f"failed to collect diff stats against {base_ref}: {message}")
 
     return parse_numstat(result.stdout)
+
+
+def is_missing_revision_error(message: str) -> bool:
+    lowered = message.lower()
+    return "unknown revision" in lowered or "bad revision" in lowered
 
 
 def parse_numstat(output: str) -> DiffStats:

@@ -11,7 +11,13 @@ from typing import Any, Callable, List, Optional
 from urllib.parse import urlparse
 
 from .config import discover_workspace_root
-from .executor import detect_high_risk_stop, execute_verification
+from .executor import (
+    collect_paths_against_base_ref,
+    detect_high_risk_stop,
+    execute_verification,
+    find_high_risk_paths,
+    path_matches_high_risk,
+)
 from .github_client import GitHubClient, GitHubClientError
 from .issue_selector import (
     ensure_open_issue,
@@ -37,8 +43,9 @@ from .mission_start import (
     resume_local_only_mission,
     start_mission,
 )
+from .merger import MergerError, evaluate_merge, merge_pull_request
 from .models import Config, ExecutionResult, MissionSummary, State, StopDecision
-from .reviewer import ReviewerError, wait_for_ci
+from .reviewer import ReviewerError, collect_diff_stats, wait_for_ci
 from .state_store import StateStore
 
 
@@ -410,6 +417,17 @@ def command_review(
             f"({state.agent_identity})"
         )
         return 1
+    try:
+        current_branch = load_current_branch(root)
+    except RuntimeError as error:
+        print(f"review aborted: {error}")
+        return 1
+    if current_branch != state.branch:
+        print(
+            "review aborted: current git branch "
+            f"{current_branch} does not match mission branch {state.branch}"
+        )
+        return 1
 
     run_id = state.run_id
     now = datetime.now(timezone.utc)
@@ -519,6 +537,11 @@ def command_review(
         completed_lease_expires_at = store.format_timestamp(
             completed_at + timedelta(minutes=config.mission_lease_minutes)
         )
+        rendered_checks = (
+            ", ".join(f"{check.name}={check.bucket}" for check in ci_status.checks)
+            if ci_status.checks
+            else "none"
+        )
         if ci_status.is_failed:
             try:
                 return handle_failed_ci_review(
@@ -547,62 +570,262 @@ def command_review(
                 print(f"review aborted: failed to persist CI review retry result: {error}")
                 return 1
 
-        review_state = State(
-            issue_number=state.issue_number,
-            pr_number=state.pr_number,
-            branch=state.branch,
-            agent_identity=config.agent_identity,
-            run_id=run_id,
-            phase="review",
-            review_loop_count=state.review_loop_count,
-            retryable_local_only=False,
-            lease_expires_at=completed_lease_expires_at,
-            last_result=render_review_result(ci_status),
-            last_error="CI polling timed out before checks completed" if ci_status.timed_out else None,
-            last_mission=state.last_mission,
-            extra={
-                **state.extra,
-                "ci_status": {
-                    "status": ci_status.status,
-                    "timed_out": ci_status.timed_out,
-                    "checks": [
-                        {
-                            "name": check.name,
-                            "state": check.state,
-                            "bucket": check.bucket,
-                            "link": check.link,
-                        }
-                        for check in ci_status.checks
-                    ],
-                },
-            },
-        )
+        if not ci_status.is_successful:
+            review_state = build_review_state(
+                state=state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=completed_lease_expires_at,
+                last_result=render_review_result(ci_status),
+                last_error="CI polling timed out before checks completed"
+                if ci_status.timed_out
+                else None,
+                ci_status=ci_status,
+            )
+            try:
+                update_review_comment(comment_lease_expires_at=completed_lease_expires_at)
+                store.save_state(review_state)
+            except (ReviewerError, RuntimeError, ValueError) as error:
+                persist_review_error(str(error))
+                print(f"review aborted: {error}")
+                return 1
+            except OSError as error:
+                persist_review_error(f"failed to persist CI review result: {error}")
+                print(f"review aborted: failed to persist CI review result: {error}")
+                return 1
+
+            print(f"review_issue: #{state.issue_number}")
+            print(f"review_pr: #{state.pr_number}")
+            print(f"ci_status: {ci_status.status}")
+            print(f"ci_timed_out: {ci_status.timed_out}")
+            print(f"ci_checks: {rendered_checks}")
+            return 1
+
         try:
             update_review_comment(comment_lease_expires_at=completed_lease_expires_at)
-            store.save_state(review_state)
-        except (ReviewerError, RuntimeError, ValueError) as error:
+            return handle_successful_ci_review(
+                root=root,
+                store=store,
+                config=config,
+                client=client,
+                run_id=run_id,
+                state=state,
+                ci_status=ci_status,
+                lease_expires_at=completed_lease_expires_at,
+                rendered_checks=rendered_checks,
+            )
+        except (
+            MissionFinalizeError,
+            MergerError,
+            ReviewerError,
+            RuntimeError,
+            ValueError,
+        ) as error:
             persist_review_error(str(error))
             print(f"review aborted: {error}")
             return 1
         except OSError as error:
-            persist_review_error(f"failed to persist CI review result: {error}")
-            print(f"review aborted: failed to persist CI review result: {error}")
+            persist_review_error(f"failed to finalize successful CI review: {error}")
+            print(f"review aborted: failed to finalize successful CI review: {error}")
             return 1
-
-        print(f"review_issue: #{state.issue_number}")
-        print(f"review_pr: #{state.pr_number}")
-        print(f"ci_status: {ci_status.status}")
-        print(f"ci_timed_out: {ci_status.timed_out}")
-        if ci_status.checks:
-            print(
-                "ci_checks: "
-                + ", ".join(f"{check.name}={check.bucket}" for check in ci_status.checks)
-            )
-        else:
-            print("ci_checks: none")
-        return 1 if ci_status.timed_out or ci_status.is_failed else 0
     finally:
         store.clear_lock(run_id)
+
+
+def handle_successful_ci_review(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    client: GitHubClient,
+    run_id: str,
+    state: State,
+    ci_status: Any,
+    lease_expires_at: str,
+    rendered_checks: str,
+) -> int:
+    issue_number = require_review_issue_number(state)
+    pr_number = require_review_pr_number(state)
+
+    try:
+        issue = client.get_issue(issue_number)
+    except GitHubClientError as error:
+        raise ReviewerError(f"failed to load issue #{issue_number} before merge: {error}") from error
+
+    pull_request = load_review_pull_request(client=client, pr_number=pr_number)
+    validate_review_pull_request_branch(
+        pull_request=pull_request,
+        state=state,
+        pr_number=pr_number,
+    )
+    base_ref = resolve_review_base_ref(pull_request=pull_request, config=config)
+    diff_stats = collect_diff_stats(root, base_ref=base_ref)
+    changed_paths = collect_paths_against_base_ref(root, base_ref=base_ref)
+    high_risk_paths = find_high_risk_paths(
+        changed_paths=changed_paths,
+        high_risk_paths=config.high_risk_paths,
+    )
+    high_risk_changed_paths = sorted(
+        path
+        for path in changed_paths
+        if any(path_matches_high_risk(path, high_risk_path) for high_risk_path in high_risk_paths)
+    )
+    decision = evaluate_merge(
+        config=config,
+        state=state,
+        issue=issue,
+        ci_status=ci_status,
+        diff_stats=diff_stats,
+        high_risk_paths=high_risk_paths,
+        high_risk_changed_paths=high_risk_changed_paths,
+    )
+    review_state = build_review_state(
+        state=state,
+        config=config,
+        run_id=run_id,
+        phase="review",
+        review_loop_count=state.review_loop_count,
+        lease_expires_at=lease_expires_at,
+        last_result=render_review_result(ci_status),
+        last_error=None,
+        ci_status=ci_status,
+        extra={
+            "merge_decision": {
+                "should_merge": decision.should_merge,
+                "reasons": list(decision.reasons),
+                "diff_stats": {
+                    "changed_files": diff_stats.changed_files,
+                    "added_lines": diff_stats.added_lines,
+                    "deleted_lines": diff_stats.deleted_lines,
+                },
+            }
+        },
+    )
+
+    print(f"review_issue: #{issue_number}")
+    print(f"review_pr: #{pr_number}")
+    print(f"ci_status: {ci_status.status}")
+    print(f"ci_timed_out: {ci_status.timed_out}")
+    print(f"ci_checks: {rendered_checks}")
+
+    if not decision.can_merge:
+        reason = "Shinobi stopped auto-merge because " + "; ".join(decision.reasons) + "."
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=build_review_state(
+                state=review_state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=lease_expires_at,
+                last_result="needs-human",
+                last_error=reason,
+                ci_status=ci_status,
+            ),
+            conclusion=decision.conclusion,
+            reason=reason,
+        )
+        print(f"merge_result: {decision.conclusion}")
+        print(reason)
+        return 1
+
+    try:
+        merge_pull_request(
+            client=client,
+            pr_number=pr_number,
+            config=config,
+            pull_request=pull_request,
+        )
+    except MergerError as error:
+        reason = f"Shinobi stopped auto-merge because {error}."
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=build_review_state(
+                state=review_state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=lease_expires_at,
+                last_result="needs-human",
+                last_error=reason,
+                ci_status=ci_status,
+            ),
+            conclusion="needs-human",
+            reason=reason,
+        )
+        print("merge_result: needs-human")
+        print(reason)
+        return 1
+
+    try:
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=review_state,
+            conclusion="merged",
+        )
+    except MissionFinalizeError as error:
+        warning = f"merged PR but finalize follow-up failed: {error}"
+        persist_merged_review_state(
+            store=store,
+            config=config,
+            state=review_state,
+            warning=warning,
+        )
+        print(f"merge_result: merged ({config.merge_method})")
+        print(f"merge_warning: {warning}")
+        return 1
+
+    print(f"merge_result: merged ({config.merge_method})")
+    return 0
+
+
+def load_review_pull_request(
+    *,
+    client: GitHubClient,
+    pr_number: int,
+) -> dict[str, Any]:
+    try:
+        return client.get_pull_request(str(pr_number))
+    except GitHubClientError as error:
+        raise ReviewerError(f"failed to load PR #{pr_number} before merge: {error}") from error
+
+
+def resolve_review_base_ref(
+    *,
+    pull_request: dict[str, Any],
+    config: Config,
+) -> str:
+    base_ref = pull_request.get("baseRefName")
+    return base_ref if isinstance(base_ref, str) and base_ref.strip() else config.main_branch
+
+
+def validate_review_pull_request_branch(
+    *,
+    pull_request: dict[str, Any],
+    state: State,
+    pr_number: int,
+) -> None:
+    branch = require_review_branch(state)
+    head_ref = pull_request.get("headRefName")
+    if not isinstance(head_ref, str) or not head_ref.strip():
+        raise ReviewerError(f"failed to validate PR #{pr_number} head branch before merge")
+    if head_ref != branch:
+        raise ReviewerError(
+            f"PR #{pr_number} head branch {head_ref} does not match mission branch {branch}"
+        )
 
 
 def handle_failed_ci_review(
@@ -824,6 +1047,67 @@ def require_review_branch(state: State) -> str:
     return state.branch
 
 
+def load_current_branch(root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise RuntimeError(f"failed to resolve current git branch: {error}") from error
+
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"git exited with {result.returncode}"
+        raise RuntimeError(f"failed to resolve current git branch: {message}")
+
+    branch = result.stdout.strip()
+    if not branch:
+        raise RuntimeError("failed to resolve current git branch: git returned an empty branch name")
+    if branch == "HEAD":
+        raise RuntimeError("current git checkout is detached; review requires the mission branch")
+    return branch
+
+
+def persist_merged_review_state(
+    *,
+    store: StateStore,
+    config: Config,
+    state: State,
+    warning: str,
+) -> None:
+    mission = state.last_mission or MissionSummary(
+        issue_number=state.issue_number,
+        pr_number=state.pr_number,
+        branch=state.branch,
+    )
+    store.save_state(
+        State(
+            issue_number=None,
+            pr_number=None,
+            branch=None,
+            agent_identity=config.agent_identity,
+            run_id=None,
+            phase="idle",
+            review_loop_count=0,
+            retryable_local_only=False,
+            lease_expires_at=None,
+            last_result="merged",
+            last_error=warning,
+            last_mission=MissionSummary(
+                issue_number=mission.issue_number,
+                pr_number=mission.pr_number,
+                branch=mission.branch,
+                phase="finalize",
+                conclusion="merged",
+            ),
+            extra=state.extra,
+        )
+    )
+
+
 def build_review_state(
     *,
     state: State,
@@ -837,15 +1121,18 @@ def build_review_state(
     ci_status: Any,
     execution_result: ExecutionResult | None = None,
     retry_run_ids: list[str] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> State:
-    extra: dict[str, Any] = {
+    merged_extra: dict[str, Any] = {
         **state.extra,
         "ci_status": serialize_ci_status(ci_status),
     }
     if execution_result is not None:
-        extra["retry_verification"] = serialize_execution_result(execution_result)
+        merged_extra["retry_verification"] = serialize_execution_result(execution_result)
     if retry_run_ids is not None:
-        extra["retry_workflow_run_ids"] = retry_run_ids
+        merged_extra["retry_workflow_run_ids"] = retry_run_ids
+    if extra is not None:
+        merged_extra.update(extra)
 
     return State(
         issue_number=state.issue_number,
@@ -860,7 +1147,7 @@ def build_review_state(
         last_result=last_result,
         last_error=last_error,
         last_mission=state.last_mission,
-        extra=extra,
+        extra=merged_extra,
     )
 
 
