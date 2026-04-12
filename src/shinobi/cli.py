@@ -35,8 +35,9 @@ from .mission_start import (
     handoff_started_mission,
     start_mission,
 )
+from .merger import MergerError, evaluate_merge, merge_pull_request
 from .models import Config, ExecutionResult, State, StopDecision
-from .reviewer import ReviewerError, wait_for_ci
+from .reviewer import ReviewerError, collect_diff_stats, wait_for_ci
 from .state_store import StateStore
 
 
@@ -517,6 +518,11 @@ def command_review(
         completed_lease_expires_at = store.format_timestamp(
             completed_at + timedelta(minutes=config.mission_lease_minutes)
         )
+        rendered_checks = (
+            ", ".join(f"{check.name}={check.bucket}" for check in ci_status.checks)
+            if ci_status.checks
+            else "none"
+        )
         if ci_status.is_failed:
             try:
                 return handle_failed_ci_review(
@@ -545,62 +551,163 @@ def command_review(
                 print(f"review aborted: failed to persist CI review retry result: {error}")
                 return 1
 
-        review_state = State(
-            issue_number=state.issue_number,
-            pr_number=state.pr_number,
-            branch=state.branch,
-            agent_identity=config.agent_identity,
-            run_id=run_id,
-            phase="review",
-            review_loop_count=state.review_loop_count,
-            retryable_local_only=False,
-            lease_expires_at=completed_lease_expires_at,
-            last_result=render_review_result(ci_status),
-            last_error="CI polling timed out before checks completed" if ci_status.timed_out else None,
-            last_mission=state.last_mission,
-            extra={
-                **state.extra,
-                "ci_status": {
-                    "status": ci_status.status,
-                    "timed_out": ci_status.timed_out,
-                    "checks": [
-                        {
-                            "name": check.name,
-                            "state": check.state,
-                            "bucket": check.bucket,
-                            "link": check.link,
-                        }
-                        for check in ci_status.checks
-                    ],
-                },
-            },
-        )
+        if not ci_status.is_successful:
+            review_state = build_review_state(
+                state=state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=completed_lease_expires_at,
+                last_result=render_review_result(ci_status),
+                last_error="CI polling timed out before checks completed"
+                if ci_status.timed_out
+                else None,
+                ci_status=ci_status,
+            )
+            try:
+                update_review_comment(comment_lease_expires_at=completed_lease_expires_at)
+                store.save_state(review_state)
+            except (ReviewerError, RuntimeError, ValueError) as error:
+                persist_review_error(str(error))
+                print(f"review aborted: {error}")
+                return 1
+            except OSError as error:
+                persist_review_error(f"failed to persist CI review result: {error}")
+                print(f"review aborted: failed to persist CI review result: {error}")
+                return 1
+
+            print(f"review_issue: #{state.issue_number}")
+            print(f"review_pr: #{state.pr_number}")
+            print(f"ci_status: {ci_status.status}")
+            print(f"ci_timed_out: {ci_status.timed_out}")
+            print(f"ci_checks: {rendered_checks}")
+            return 1
+
         try:
             update_review_comment(comment_lease_expires_at=completed_lease_expires_at)
-            store.save_state(review_state)
-        except (ReviewerError, RuntimeError, ValueError) as error:
+            return handle_successful_ci_review(
+                root=root,
+                store=store,
+                config=config,
+                client=client,
+                run_id=run_id,
+                state=state,
+                ci_status=ci_status,
+                lease_expires_at=completed_lease_expires_at,
+                rendered_checks=rendered_checks,
+            )
+        except (
+            MissionFinalizeError,
+            MergerError,
+            ReviewerError,
+            RuntimeError,
+            ValueError,
+        ) as error:
             persist_review_error(str(error))
             print(f"review aborted: {error}")
             return 1
         except OSError as error:
-            persist_review_error(f"failed to persist CI review result: {error}")
-            print(f"review aborted: failed to persist CI review result: {error}")
+            persist_review_error(f"failed to finalize successful CI review: {error}")
+            print(f"review aborted: failed to finalize successful CI review: {error}")
             return 1
-
-        print(f"review_issue: #{state.issue_number}")
-        print(f"review_pr: #{state.pr_number}")
-        print(f"ci_status: {ci_status.status}")
-        print(f"ci_timed_out: {ci_status.timed_out}")
-        if ci_status.checks:
-            print(
-                "ci_checks: "
-                + ", ".join(f"{check.name}={check.bucket}" for check in ci_status.checks)
-            )
-        else:
-            print("ci_checks: none")
-        return 1 if ci_status.timed_out or ci_status.is_failed else 0
     finally:
         store.clear_lock(run_id)
+
+
+def handle_successful_ci_review(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    client: GitHubClient,
+    run_id: str,
+    state: State,
+    ci_status: Any,
+    lease_expires_at: str,
+    rendered_checks: str,
+) -> int:
+    issue_number = require_review_issue_number(state)
+    pr_number = require_review_pr_number(state)
+
+    try:
+        issue = client.get_issue(issue_number)
+    except GitHubClientError as error:
+        raise ReviewerError(f"failed to load issue #{issue_number} before merge: {error}") from error
+
+    diff_stats = collect_diff_stats(root, base_ref=config.main_branch)
+    decision = evaluate_merge(
+        config=config,
+        state=state,
+        issue=issue,
+        ci_status=ci_status,
+        diff_stats=diff_stats,
+    )
+    review_state = build_review_state(
+        state=state,
+        config=config,
+        run_id=run_id,
+        phase="review",
+        review_loop_count=state.review_loop_count,
+        lease_expires_at=lease_expires_at,
+        last_result=render_review_result(ci_status),
+        last_error=None,
+        ci_status=ci_status,
+        extra={
+            "merge_decision": {
+                "should_merge": decision.should_merge,
+                "reasons": list(decision.reasons),
+                "diff_stats": {
+                    "changed_files": diff_stats.changed_files,
+                    "added_lines": diff_stats.added_lines,
+                    "deleted_lines": diff_stats.deleted_lines,
+                },
+            }
+        },
+    )
+
+    print(f"review_issue: #{issue_number}")
+    print(f"review_pr: #{pr_number}")
+    print(f"ci_status: {ci_status.status}")
+    print(f"ci_timed_out: {ci_status.timed_out}")
+    print(f"ci_checks: {rendered_checks}")
+
+    if not decision.can_merge:
+        reason = "Shinobi stopped auto-merge because " + "; ".join(decision.reasons) + "."
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=build_review_state(
+                state=review_state,
+                config=config,
+                run_id=run_id,
+                phase="review",
+                review_loop_count=state.review_loop_count,
+                lease_expires_at=lease_expires_at,
+                last_result="needs-human",
+                last_error=reason,
+                ci_status=ci_status,
+            ),
+            conclusion="needs-human",
+            reason=reason,
+        )
+        print("merge_result: needs-human")
+        print(reason)
+        return 1
+
+    merge_pull_request(client=client, pr_number=pr_number, config=config)
+    finalize_mission(
+        root=root,
+        store=store,
+        config=config,
+        run_id=run_id,
+        state=review_state,
+        conclusion="merged",
+    )
+    print(f"merge_result: merged ({config.merge_method})")
+    return 0
 
 
 def handle_failed_ci_review(
@@ -835,15 +942,18 @@ def build_review_state(
     ci_status: Any,
     execution_result: ExecutionResult | None = None,
     retry_run_ids: list[str] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> State:
-    extra: dict[str, Any] = {
+    merged_extra: dict[str, Any] = {
         **state.extra,
         "ci_status": serialize_ci_status(ci_status),
     }
     if execution_result is not None:
-        extra["retry_verification"] = serialize_execution_result(execution_result)
+        merged_extra["retry_verification"] = serialize_execution_result(execution_result)
     if retry_run_ids is not None:
-        extra["retry_workflow_run_ids"] = retry_run_ids
+        merged_extra["retry_workflow_run_ids"] = retry_run_ids
+    if extra is not None:
+        merged_extra.update(extra)
 
     return State(
         issue_number=state.issue_number,
@@ -858,7 +968,7 @@ def build_review_state(
         last_result=last_result,
         last_error=last_error,
         last_mission=state.last_mission,
-        extra=extra,
+        extra=merged_extra,
     )
 
 
