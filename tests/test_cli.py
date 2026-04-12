@@ -2697,15 +2697,21 @@ class CliTest(unittest.TestCase):
                     state.run_id = "previous-run"
                     state.retryable_local_only = True
                     store.save_state(state)
+                    fake_client = FakeGitHubClient(
+                        issue_number=6,
+                        title="[TASK] run start phase",
+                        labels=["shinobi:ready"],
+                    )
 
                     output = io.StringIO()
-                    with patch("shinobi.cli.git_local_branch_exists", return_value=True):
-                        with patch(
-                            "shinobi.cli.git_current_branch",
-                            return_value="feature/issue-6-run-start-phase",
-                        ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["run"])
+                    with patch("shinobi.cli.GitHubClient", return_value=fake_client):
+                        with patch("shinobi.cli.git_local_branch_exists", return_value=True):
+                            with patch(
+                                "shinobi.cli.git_current_branch",
+                                return_value="feature/issue-6-run-start-phase",
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
@@ -2724,6 +2730,12 @@ class CliTest(unittest.TestCase):
                 phase="start",
                 conclusion="aborted",
             ))
+            self.assertEqual(len(fake_client.comments), 1)
+            self.assertIn(
+                "Shinobi cleared an invalid retryable local-only mission record",
+                str(fake_client.comments[0]["body"]),
+            )
+            self.assertIn("retryable start failure record is missing", str(fake_client.comments[0]["body"]))
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
     def test_run_cleans_up_retryable_local_only_state_when_current_branch_differs(self) -> None:
@@ -2756,15 +2768,21 @@ class CliTest(unittest.TestCase):
                         + "\n",
                         encoding="utf-8",
                     )
+                    fake_client = FakeGitHubClient(
+                        issue_number=6,
+                        title="[TASK] run start phase",
+                        labels=["shinobi:ready"],
+                    )
 
                     output = io.StringIO()
-                    with patch("shinobi.cli.git_local_branch_exists", return_value=True):
-                        with patch(
-                            "shinobi.cli.git_current_branch",
-                            return_value="feature/issue-999-other-work",
-                        ):
-                            with redirect_stdout(output):
-                                exit_code = cli.main(["run"])
+                    with patch("shinobi.cli.GitHubClient", return_value=fake_client):
+                        with patch("shinobi.cli.git_local_branch_exists", return_value=True):
+                            with patch(
+                                "shinobi.cli.git_current_branch",
+                                return_value="feature/issue-999-other-work",
+                            ):
+                                with redirect_stdout(output):
+                                    exit_code = cli.main(["run"])
 
             self.assertEqual(exit_code, 1)
             self.assertIn(
@@ -2787,7 +2805,53 @@ class CliTest(unittest.TestCase):
                     conclusion="aborted",
                 ),
             )
+            self.assertEqual(len(fake_client.comments), 1)
+            self.assertIn(
+                "feature/issue-999-other-work != feature/issue-6-run-start-phase",
+                str(fake_client.comments[0]["body"]),
+            )
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_cleanup_retryable_local_only_state_reports_state_persistence_failure(self) -> None:
+        state = State(
+            issue_number=6,
+            pr_number=None,
+            branch="feature/issue-6-run-start-phase",
+            agent_identity="owner/repo#default@test",
+            run_id="run-123",
+            phase="start",
+            review_loop_count=0,
+            retryable_local_only=True,
+            lease_expires_at=None,
+            last_result="start_pending",
+            last_error=None,
+        )
+        store = Mock(spec=StateStore)
+        store.save_state.side_effect = OSError("disk full")
+        config = Config(
+            repo="owner/repo",
+            main_branch="main",
+            agent_identity="owner/repo#default@test",
+            mission_lease_minutes=30,
+            mission_heartbeat_interval_minutes=5,
+            max_review_loops=3,
+            labels={},
+            verification_commands={},
+        )
+
+        cleanup_error = cli.cleanup_retryable_local_only_state(
+            root=Path("/tmp/repo"),
+            store=store,
+            config=config,
+            state=state,
+            conclusion="aborted",
+            error="retryable start failure record is missing",
+        )
+
+        self.assertEqual(
+            cleanup_error,
+            "failed to clear retryable local-only state: disk full",
+        )
 
     def test_run_cleans_up_invalid_retryable_local_only_state_before_conflicting_issue_check(
         self,

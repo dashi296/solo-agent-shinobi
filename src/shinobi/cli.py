@@ -1126,13 +1126,18 @@ def recover_local_only_mission_candidate(
 
     issue_number = state.issue_number
     if issue_number is None:
-        clear_retryable_local_only_state(
+        cleanup_error = cleanup_retryable_local_only_state(
+            root=root,
             store=store,
+            config=config,
             state=state,
             conclusion="aborted",
             error="retryable local-only mission is missing issue_number",
         )
-        return None, "retryable local-only mission exists but local state is missing issue_number"
+        message = "retryable local-only mission exists but local state is missing issue_number"
+        if cleanup_error is not None:
+            message += f"; cleanup also failed: {cleanup_error}"
+        return None, message
 
     recovery_error = validate_retryable_local_only_state(
         root=root,
@@ -1141,16 +1146,21 @@ def recover_local_only_mission_candidate(
         state=state,
     )
     if recovery_error is not None:
-        clear_retryable_local_only_state(
+        cleanup_error = cleanup_retryable_local_only_state(
+            root=root,
             store=store,
+            config=config,
             state=state,
             conclusion="aborted",
             error=recovery_error,
         )
-        return None, (
+        message = (
             f"retryable local-only mission for issue #{issue_number} could not be resumed: "
             f"{recovery_error}"
         )
+        if cleanup_error is not None:
+            message += f"; cleanup also failed: {cleanup_error}"
+        return None, message
 
     if requested_issue is not None and requested_issue != issue_number:
         return None, f"retryable local-only mission exists for issue #{issue_number}"
@@ -1198,34 +1208,76 @@ def validate_retryable_local_only_state(
     return None
 
 
-def clear_retryable_local_only_state(
+def cleanup_retryable_local_only_state(
     *,
+    root: Path,
     store: StateStore,
+    config: Config,
     state: State,
     conclusion: str,
     error: str,
-) -> None:
-    store.save_state(
-        State(
-            issue_number=None,
-            pr_number=None,
-            branch=None,
-            agent_identity=state.agent_identity,
-            run_id=None,
-            phase="idle",
-            review_loop_count=0,
-            retryable_local_only=False,
-            lease_expires_at=None,
-            last_result=conclusion,
-            last_error=error,
-            last_mission=MissionSummary(
+) -> str | None:
+    try:
+        store.save_state(
+            State(
+                issue_number=None,
+                pr_number=None,
+                branch=None,
+                agent_identity=state.agent_identity,
+                run_id=None,
+                phase="idle",
+                review_loop_count=0,
+                retryable_local_only=False,
+                lease_expires_at=None,
+                last_result=conclusion,
+                last_error=error,
+                last_mission=MissionSummary(
+                    issue_number=state.issue_number,
+                    pr_number=state.pr_number,
+                    branch=state.branch,
+                    phase=state.phase,
+                    conclusion=conclusion,
+                ),
+            )
+        )
+    except OSError as save_error:
+        return f"failed to clear retryable local-only state: {save_error}"
+
+    if state.issue_number is None:
+        return None
+
+    try:
+        GitHubClient(root, repo=config.repo).create_issue_comment(
+            state.issue_number,
+            render_retryable_local_only_cleanup_comment(
                 issue_number=state.issue_number,
-                pr_number=state.pr_number,
                 branch=state.branch,
                 phase=state.phase,
-                conclusion=conclusion,
+                error=error,
             ),
         )
+    except GitHubClientError as comment_error:
+        return (
+            "failed to comment on cleared retryable local-only mission for "
+            f"issue #{state.issue_number}: {comment_error}"
+        )
+    return None
+
+
+def render_retryable_local_only_cleanup_comment(
+    *,
+    issue_number: int,
+    branch: str | None,
+    phase: str,
+    error: str,
+) -> str:
+    branch_line = branch if branch is not None else "unknown"
+    return (
+        "Shinobi cleared an invalid retryable local-only mission record and will not auto-resume it.\n\n"
+        f"- issue: #{issue_number}\n"
+        f"- branch: {branch_line}\n"
+        f"- phase: {phase}\n"
+        f"- reason: {error}\n"
     )
 
 
