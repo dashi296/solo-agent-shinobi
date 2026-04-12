@@ -37,7 +37,7 @@ from .mission_start import (
     start_mission,
 )
 from .merger import MergerError, evaluate_merge, merge_pull_request
-from .models import Config, ExecutionResult, State, StopDecision
+from .models import Config, ExecutionResult, MissionSummary, State, StopDecision
 from .reviewer import ReviewerError, collect_diff_stats, wait_for_ci
 from .state_store import StateStore
 
@@ -736,14 +736,27 @@ def handle_successful_ci_review(
         print(reason)
         return 1
 
-    finalize_mission(
-        root=root,
-        store=store,
-        config=config,
-        run_id=run_id,
-        state=review_state,
-        conclusion="merged",
-    )
+    try:
+        finalize_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=review_state,
+            conclusion="merged",
+        )
+    except MissionFinalizeError as error:
+        warning = f"merged PR but finalize follow-up failed: {error}"
+        persist_merged_review_state(
+            store=store,
+            config=config,
+            state=review_state,
+            warning=warning,
+        )
+        print(f"merge_result: merged ({config.merge_method})")
+        print(f"merge_warning: {warning}")
+        return 1
+
     print(f"merge_result: merged ({config.merge_method})")
     return 0
 
@@ -989,6 +1002,43 @@ def load_current_branch(root: Path) -> str:
     if branch == "HEAD":
         raise RuntimeError("current git checkout is detached; review requires the mission branch")
     return branch
+
+
+def persist_merged_review_state(
+    *,
+    store: StateStore,
+    config: Config,
+    state: State,
+    warning: str,
+) -> None:
+    mission = state.last_mission or MissionSummary(
+        issue_number=state.issue_number,
+        pr_number=state.pr_number,
+        branch=state.branch,
+    )
+    store.save_state(
+        State(
+            issue_number=None,
+            pr_number=None,
+            branch=None,
+            agent_identity=config.agent_identity,
+            run_id=None,
+            phase="idle",
+            review_loop_count=0,
+            retryable_local_only=False,
+            lease_expires_at=None,
+            last_result="merged",
+            last_error=warning,
+            last_mission=MissionSummary(
+                issue_number=mission.issue_number,
+                pr_number=mission.pr_number,
+                branch=mission.branch,
+                phase="finalize",
+                conclusion="merged",
+            ),
+            extra=state.extra,
+        )
+    )
 
 
 def build_review_state(

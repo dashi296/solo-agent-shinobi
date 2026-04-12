@@ -836,6 +836,107 @@ class CliTest(unittest.TestCase):
             self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
             self.assertIsNone(store.load_lock())
 
+    def test_review_persists_merged_state_when_finalize_fails_after_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.collect_diff_stats",
+                            return_value=DiffStats(
+                                changed_files=2,
+                                added_lines=10,
+                                deleted_lines=3,
+                            ),
+                        ):
+                            with patch(
+                                "shinobi.cli.wait_for_ci",
+                                return_value=CIStatus(
+                                    checks=[
+                                        PullRequestCheck(
+                                            name="test",
+                                            state="SUCCESS",
+                                            bucket="pass",
+                                        )
+                                    ],
+                                    status="success",
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.load_current_branch",
+                                    return_value="feature/issue-33-review-ci",
+                                ):
+                                    with patch(
+                                        "shinobi.cli.finalize_mission",
+                                        side_effect=MissionFinalizeError(
+                                            "failed to create finalize comment on issue #33: api unavailable"
+                                        ),
+                                    ):
+                                        with redirect_stdout(output):
+                                            exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("merge_result: merged (squash)", rendered)
+            self.assertIn("merge_warning: merged PR but finalize follow-up failed", rendered)
+            client.merge_pull_request.assert_called_once_with(
+                44,
+                merge_method=config.merge_method,
+                delete_branch=True,
+            )
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "merged")
+            self.assertIn("merged PR but finalize follow-up failed", saved_state.last_error)
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.pr_number, 44)
+            self.assertEqual(saved_state.last_mission.conclusion, "merged")
+            self.assertIsNone(store.load_lock())
+
     def test_review_timeout_returns_nonzero_and_persists_pending_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
