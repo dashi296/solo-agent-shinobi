@@ -1134,9 +1134,6 @@ def recover_local_only_mission_candidate(
         )
         return None, "retryable local-only mission exists but local state is missing issue_number"
 
-    if requested_issue is not None and requested_issue != issue_number:
-        return None, f"retryable local-only mission exists for issue #{issue_number}"
-
     recovery_error = validate_retryable_local_only_state(
         root=root,
         store=store,
@@ -1154,6 +1151,9 @@ def recover_local_only_mission_candidate(
             f"retryable local-only mission for issue #{issue_number} could not be resumed: "
             f"{recovery_error}"
         )
+
+    if requested_issue is not None and requested_issue != issue_number:
+        return None, f"retryable local-only mission exists for issue #{issue_number}"
 
     return issue_number, None
 
