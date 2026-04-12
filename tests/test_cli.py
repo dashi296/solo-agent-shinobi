@@ -7889,6 +7889,39 @@ class ContextBuilderTest(unittest.TestCase):
             },
         )
 
+    def test_build_mission_context_ignores_review_notes_title_section_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            store = StateStore(root)
+            store.paths.shinobi_dir.mkdir()
+            store.paths.review_notes_path.write_text(
+                "# Review Notes\n\n"
+                "この説明文は category として選ばれてはならない。\n\n"
+                "## docs-consistency\n"
+                "- rule: update docs when behavior changes\n\n"
+                "## scope-control\n"
+                "- rule: keep candidate files narrow\n",
+                encoding="utf-8",
+            )
+
+            context = build_mission_context(
+                root,
+                {
+                    "number": 64,
+                    "title": "Update docs for context phase",
+                    "body": (
+                        "## 対象\n"
+                        "- `docs/product-spec.md`\n"
+                        "- `README.md`\n\n"
+                        "## 要件\n"
+                        "- context phase の説明を更新する\n"
+                    ),
+                },
+            )
+
+        self.assertEqual(context.review_note_categories, ["docs-consistency"])
+        self.assertNotIn("review notes", context.review_note_entries)
+
     def test_build_mission_context_treats_missing_knowledge_as_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             context = build_mission_context(

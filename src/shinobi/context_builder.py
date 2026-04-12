@@ -324,11 +324,38 @@ def broad_scope_reason(
 
 
 def parse_review_note_sections(body: str) -> dict[str, list[str]]:
-    return {
-        key: values
-        for key, values in parse_markdown_sections(body).items()
-        if values
-    }
+    sections: dict[str, list[str]] = {}
+    current_key: str | None = None
+    current_lines: list[str] = []
+
+    for line in body.splitlines():
+        heading_match = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$", line)
+        if heading_match is not None:
+            level = len(heading_match.group(1))
+            heading = heading_match.group(2).strip().lower()
+            if level == 2:
+                if current_key is not None:
+                    append_section(sections, current_key, current_lines)
+                current_key = heading
+                current_lines = []
+                continue
+            if level < 2:
+                if current_key is not None:
+                    append_section(sections, current_key, current_lines)
+                current_key = None
+                current_lines = []
+                continue
+            if current_key is not None:
+                current_lines.append(heading)
+            continue
+
+        if current_key is not None:
+            current_lines.append(line)
+
+    if current_key is not None:
+        append_section(sections, current_key, current_lines)
+
+    return {key: values for key, values in sections.items() if values}
 
 
 def select_review_note_categories(
