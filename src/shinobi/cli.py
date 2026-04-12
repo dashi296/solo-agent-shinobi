@@ -28,10 +28,12 @@ from .issue_selector import (
 )
 from .mission_finalize import MissionFinalizeError, finalize_mission
 from .mission_publish import (
+    MISSION_STATE_MARKER,
     MissionPublishError,
     blocking_verification_results,
     find_blocking_publish_labels,
     load_publishable_issue_label_names,
+    parse_mission_state_fields,
     publish_mission,
     stop_publish_for_blocking_labels,
     upsert_review_comment,
@@ -40,6 +42,7 @@ from .mission_start import (
     MissionStartError,
     StartedMission,
     handoff_started_mission,
+    labels_to_remove_for_transition,
     resume_local_only_mission,
     start_mission,
 )
@@ -63,6 +66,19 @@ class StatusMissionRef:
 class ActionsRunRetry:
     run_id: str
     failed_only: bool
+
+
+@dataclass(frozen=True)
+class ActiveMissionRecovery:
+    issue_number: int
+    started_mission: StartedMission | None = None
+    abort_message: str | None = None
+
+
+@dataclass(frozen=True)
+class MissionStateComment:
+    comment_id: int | None
+    fields: dict[str, str]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1255,11 +1271,32 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
             print(f"run aborted: {error}")
             return 1
 
+        active_recovery = recover_stale_active_mission_candidate(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            state=state,
+            requested_issue=issue_number,
+            local_only_issue=local_only_issue,
+            active_issue_numbers=active_issue_numbers,
+            now=now,
+        )
+        if active_recovery is not None and active_recovery.abort_message is not None:
+            print(f"run aborted: {active_recovery.abort_message}")
+            return 1
+
         selected_issue = local_only_issue if local_only_issue is not None else issue_number
+        if active_recovery is not None:
+            selected_issue = active_recovery.issue_number
         blocking_active_issue_numbers = active_issue_numbers
         if local_only_issue is not None:
             blocking_active_issue_numbers = [
                 number for number in active_issue_numbers if number != local_only_issue
+            ]
+        if active_recovery is not None:
+            blocking_active_issue_numbers = [
+                number for number in blocking_active_issue_numbers if number != active_recovery.issue_number
             ]
         if selected_issue is None:
             if blocking_active_issue_numbers:
@@ -1293,7 +1330,7 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                         config.labels["working"],
                         config.labels["reviewing"],
                     ),
-                    allow_active_labels=local_only_issue is not None,
+                    allow_active_labels=local_only_issue is not None or active_recovery is not None,
                     repo=config.repo,
                 )
             except RuntimeError as error:
@@ -1301,26 +1338,29 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                 return 1
 
         try:
-            issue = load_issue(root, selected_issue, repo=config.repo)
-            if local_only_issue is not None:
-                started_mission = resume_local_only_mission(
-                    root=root,
-                    store=store,
-                    config=config,
-                    run_id=run_id,
-                    issue=issue,
-                    state=store.load_state(),
-                    now=now,
-                )
+            if active_recovery is not None and active_recovery.started_mission is not None:
+                started_mission = active_recovery.started_mission
             else:
-                started_mission = start_mission(
-                    root=root,
-                    store=store,
-                    config=config,
-                    run_id=run_id,
-                    issue=issue,
-                    now=now,
-                )
+                issue = load_issue(root, selected_issue, repo=config.repo)
+                if local_only_issue is not None:
+                    started_mission = resume_local_only_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id=run_id,
+                        issue=issue,
+                        state=store.load_state(),
+                        now=now,
+                    )
+                else:
+                    started_mission = start_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id=run_id,
+                        issue=issue,
+                        now=now,
+                    )
             execution_result = execute_verification(root, config)
             handoff_failed_verification(
                 root=root,
@@ -1398,6 +1438,430 @@ def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int
         )
 
     return None
+
+
+def recover_stale_active_mission_candidate(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    state: State,
+    requested_issue: Optional[int],
+    local_only_issue: int | None,
+    active_issue_numbers: list[int],
+    now: datetime,
+) -> ActiveMissionRecovery | None:
+    if local_only_issue is not None or not active_issue_numbers:
+        return None
+
+    if requested_issue is not None:
+        other_active_issue_numbers = [
+            number for number in active_issue_numbers if number != requested_issue
+        ]
+        if other_active_issue_numbers:
+            return None
+        if requested_issue not in active_issue_numbers:
+            return None
+        candidate_issue_number = requested_issue
+    else:
+        if len(active_issue_numbers) != 1:
+            return ActiveMissionRecovery(
+                issue_number=active_issue_numbers[0],
+                abort_message=(
+                    "multiple active GitHub missions exist; stale recovery requires a "
+                    "single active mission"
+                ),
+            )
+        candidate_issue_number = active_issue_numbers[0]
+
+    try:
+        return recover_stale_active_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            previous_state=state,
+            issue_number=candidate_issue_number,
+            now=now,
+        )
+    except (GitHubClientError, OSError, RuntimeError, ValueError) as error:
+        return ActiveMissionRecovery(
+            issue_number=candidate_issue_number,
+            abort_message=f"active GitHub mission recovery failed for issue #{candidate_issue_number}: {error}",
+        )
+
+
+def recover_stale_active_mission(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    previous_state: State,
+    issue_number: int,
+    now: datetime,
+) -> ActiveMissionRecovery:
+    client = GitHubClient(root, repo=config.repo)
+    issue = client.get_issue(issue_number)
+    mission_comment = load_latest_mission_state_comment(client, issue_number)
+    mission_fields = mission_comment.fields if mission_comment is not None else {}
+    recovery_error = stale_active_mission_recovery_error(
+        root=root,
+        store=store,
+        config=config,
+        issue=issue,
+        mission_fields=mission_fields,
+        now=now,
+    )
+
+    if recovery_error is not None and not recovery_error.startswith("live mission"):
+        cleanup_stale_active_mission(
+            root=root,
+            store=store,
+            config=config,
+            issue=issue,
+            mission_fields=mission_fields,
+            reason=recovery_error,
+        )
+        return ActiveMissionRecovery(
+            issue_number=issue_number,
+            abort_message=(
+                f"stale active mission for issue #{issue_number} could not be resumed: "
+                f"{recovery_error}; moved issue to {config.labels['needs_human']}"
+            ),
+        )
+
+    if recovery_error is not None:
+        return ActiveMissionRecovery(issue_number=issue_number, abort_message=recovery_error)
+
+    phase = mission_fields["phase"]
+    pr_number = parse_optional_mission_pr_number(mission_fields.get("pr"))
+    branch = mission_fields["branch"]
+    previous_run_id = mission_fields["run_id"]
+    lease_expires_at = store.format_timestamp(
+        now + timedelta(minutes=config.mission_lease_minutes)
+    )
+
+    if phase != "start" or pr_number is not None:
+        store.save_state(
+            State(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=branch,
+                agent_identity=config.agent_identity,
+                run_id=previous_run_id,
+                phase=phase,
+                review_loop_count=previous_state.review_loop_count,
+                retryable_local_only=False,
+                lease_expires_at=mission_fields.get("lease_expires_at"),
+                last_result="restored-stale-active",
+                last_error=None,
+                last_mission=previous_state.last_mission,
+            )
+        )
+        return ActiveMissionRecovery(
+            issue_number=issue_number,
+            abort_message=(
+                f"restored stale active mission for issue #{issue_number} in phase {phase}; "
+                "resume with the phase-specific command"
+            ),
+        )
+
+    active_state = State(
+        issue_number=issue_number,
+        pr_number=None,
+        branch=branch,
+        agent_identity=config.agent_identity,
+        run_id=run_id,
+        phase="start",
+        review_loop_count=0,
+        retryable_local_only=False,
+        lease_expires_at=lease_expires_at,
+        last_result="resumed-stale-active",
+        last_error=None,
+        last_mission=previous_state.last_mission,
+    )
+    store.save_state(active_state)
+    try:
+        upsert_start_recovery_comment(
+            client=client,
+            issue_number=issue_number,
+            branch=branch,
+            lease_expires_at=lease_expires_at,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
+            mission_comment=mission_comment,
+        )
+    except GitHubClientError as error:
+        message = f"failed to update stale recovery mission-state comment: {error}"
+        store.save_state(
+            State(
+                issue_number=None,
+                pr_number=None,
+                branch=None,
+                agent_identity=config.agent_identity,
+                run_id=None,
+                phase="idle",
+                review_loop_count=0,
+                retryable_local_only=False,
+                lease_expires_at=None,
+                last_result="aborted",
+                last_error=message,
+                last_mission=MissionSummary(
+                    issue_number=issue_number,
+                    pr_number=None,
+                    branch=branch,
+                    phase="start",
+                    conclusion="aborted",
+                ),
+            )
+        )
+        return ActiveMissionRecovery(
+            issue_number=issue_number,
+            abort_message=(
+                f"stale active mission for issue #{issue_number} could not be resumed: "
+                f"{message}"
+            ),
+        )
+    return ActiveMissionRecovery(
+        issue_number=issue_number,
+        started_mission=StartedMission(
+            issue_number=issue_number,
+            branch=branch,
+            lease_expires_at=lease_expires_at,
+        ),
+    )
+
+
+def load_latest_mission_state_comment(
+    client: GitHubClient, issue_number: int
+) -> MissionStateComment | None:
+    latest: MissionStateComment | None = None
+    for comment in client.list_issue_comments(issue_number):
+        fields = parse_mission_state_fields(str(comment.get("body") or ""))
+        if fields.get("issue") != str(issue_number):
+            continue
+        comment_id = comment.get("id")
+        latest = MissionStateComment(
+            comment_id=int(comment_id) if comment_id is not None else None,
+            fields=fields,
+        )
+    return latest
+
+
+def stale_active_mission_recovery_error(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    issue: dict[str, Any],
+    mission_fields: dict[str, str],
+    now: datetime,
+) -> str | None:
+    issue_number = int(issue["number"])
+    label_names = get_status_label_names(issue)
+    active_labels = {config.labels["working"], config.labels["reviewing"]}
+    if not label_names.intersection(active_labels):
+        return f"issue #{issue_number} no longer has an active mission label"
+
+    missing_fields = [
+        field
+        for field in (
+            "issue",
+            "branch",
+            "phase",
+            "lease_expires_at",
+            "pr",
+            "agent_identity",
+            "run_id",
+        )
+        if not mission_fields.get(field)
+    ]
+    if missing_fields:
+        return "mission-state comment is missing required field(s): " + ", ".join(missing_fields)
+
+    if mission_fields["issue"] != str(issue_number):
+        return (
+            "mission-state issue does not match active issue "
+            f"({mission_fields['issue']} != {issue_number})"
+        )
+
+    try:
+        lease_expires_at = store.parse_timestamp(mission_fields["lease_expires_at"])
+    except ValueError as error:
+        return f"mission-state lease_expires_at is invalid: {error}"
+    if now <= lease_expires_at:
+        return f"live mission for issue #{issue_number} still has an active lease"
+
+    if mission_fields["agent_identity"] != config.agent_identity:
+        return (
+            "mission-state agent_identity does not match current workspace "
+            f"({mission_fields['agent_identity']} != {config.agent_identity})"
+        )
+
+    phase = mission_fields["phase"]
+    if phase not in {"start", "publish", "review"}:
+        return f"mission-state phase {phase} is not resumable"
+    active_label_names = label_names.intersection(active_labels)
+    if len(active_label_names) > 1:
+        rendered = ", ".join(sorted(active_label_names))
+        return f"issue has multiple active mission labels: {rendered}"
+    expected_label = config.labels["working"] if phase == "start" else config.labels["reviewing"]
+    if expected_label not in label_names:
+        return f"mission-state phase {phase} requires issue label {expected_label}"
+
+    branch = mission_fields["branch"]
+    if not git_local_branch_exists(root, branch):
+        return f"branch {branch} does not exist locally"
+    current_branch = git_current_branch(root)
+    if current_branch != branch:
+        current_branch_label = current_branch if current_branch is not None else "detached HEAD"
+        return (
+            "current branch does not match stale active mission branch "
+            f"({current_branch_label} != {branch})"
+        )
+
+    try:
+        pr_number = parse_optional_mission_pr_number(mission_fields.get("pr"))
+    except ValueError as error:
+        return str(error)
+    if phase == "start" and pr_number is not None:
+        return "mission-state phase start requires pr null"
+    if phase in {"publish", "review"} and pr_number is None:
+        return f"mission-state phase {phase} requires pr"
+    return None
+
+
+def parse_optional_mission_pr_number(value: str | None) -> int | None:
+    if value is None or value == "null" or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError as error:
+        raise ValueError(f"mission-state pr is invalid: {value}") from error
+
+
+def cleanup_stale_active_mission(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    issue: dict[str, Any],
+    mission_fields: dict[str, str],
+    reason: str,
+) -> None:
+    issue_number = int(issue["number"])
+    label_names = get_status_label_names(issue)
+    needs_human_label = config.labels["needs_human"]
+    try:
+        pr_number = parse_optional_mission_pr_number(mission_fields.get("pr"))
+    except ValueError:
+        pr_number = None
+    removable_labels = labels_to_remove_for_transition(
+        config=config,
+        current_label_names=label_names | {needs_human_label},
+        target_label=needs_human_label,
+    )
+    client = GitHubClient(root, repo=config.repo)
+    client.update_issue_labels(issue_number, add=[needs_human_label])
+    if removable_labels:
+        client.update_issue_labels(issue_number, remove=removable_labels)
+    client.create_issue_comment(
+        issue_number,
+        render_stale_active_mission_cleanup_comment(
+            issue_number=issue_number,
+            branch=mission_fields.get("branch"),
+            phase=mission_fields.get("phase"),
+            reason=reason,
+        ),
+    )
+    store.save_state(
+        State(
+            issue_number=None,
+            pr_number=None,
+            branch=None,
+            agent_identity=config.agent_identity,
+            run_id=None,
+            phase="idle",
+            review_loop_count=0,
+            retryable_local_only=False,
+            lease_expires_at=None,
+            last_result="needs-human",
+            last_error=reason,
+            last_mission=MissionSummary(
+                issue_number=issue_number,
+                pr_number=pr_number,
+                branch=mission_fields.get("branch"),
+                phase=mission_fields.get("phase"),
+                conclusion="needs-human",
+            ),
+        )
+    )
+
+
+def upsert_start_recovery_comment(
+    *,
+    client: GitHubClient,
+    issue_number: int,
+    branch: str,
+    lease_expires_at: str,
+    agent_identity: str,
+    run_id: str,
+    mission_comment: MissionStateComment | None,
+) -> None:
+    body = render_start_recovery_comment(
+        issue_number=issue_number,
+        branch=branch,
+        lease_expires_at=lease_expires_at,
+        agent_identity=agent_identity,
+        run_id=run_id,
+    )
+    if mission_comment is not None and mission_comment.comment_id is not None:
+        client.update_issue_comment(mission_comment.comment_id, body)
+        return
+    client.create_issue_comment(issue_number, body)
+
+
+def render_start_recovery_comment(
+    *,
+    issue_number: int,
+    branch: str,
+    lease_expires_at: str,
+    agent_identity: str,
+    run_id: str,
+) -> str:
+    return (
+        f"{MISSION_STATE_MARKER}\n"
+        f"issue: {issue_number}\n"
+        f"branch: {branch}\n"
+        "phase: start\n"
+        "pr: null\n"
+        f"lease_expires_at: {lease_expires_at}\n"
+        f"agent_identity: {agent_identity}\n"
+        f"run_id: {run_id}\n"
+        "-->\n"
+        "Shinobi Recovery\n\n"
+        f"任務 #{issue_number} の stale な start phase を再開します。\n"
+    )
+
+
+def render_stale_active_mission_cleanup_comment(
+    *,
+    issue_number: int,
+    branch: str | None,
+    phase: str | None,
+    reason: str,
+) -> str:
+    branch_line = branch if branch is not None else "unknown"
+    phase_line = phase if phase is not None else "unknown"
+    return (
+        "Shinobi could not safely resume a stale active mission and moved it to needs-human.\n\n"
+        f"- issue: #{issue_number}\n"
+        f"- branch: {branch_line}\n"
+        f"- phase: {phase_line}\n"
+        f"- reason: {reason}\n"
+    )
 
 
 def recover_local_only_mission_candidate(
