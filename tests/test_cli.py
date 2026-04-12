@@ -49,6 +49,7 @@ from shinobi.mission_start import (
     MissionStartError,
     StartedMission,
     handoff_started_mission,
+    render_start_comment,
     resume_local_only_mission,
     start_mission,
 )
@@ -2508,6 +2509,354 @@ class CliTest(unittest.TestCase):
             self.assertIn("test: failed", handoff_mock.call_args.kwargs["reason"])
             publish_mock.assert_not_called()
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_persists_self_review_before_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    published_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        pr_number=31,
+                        pr_url="https://github.com/owner/repo/pull/31",
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="lint",
+                                command=[],
+                                status="not_configured",
+                                message="verification command `lint` is not configured",
+                            ),
+                            VerificationCommandResult(
+                                name="typecheck",
+                                command=["python3", "-m", "compileall"],
+                                status="passed",
+                                returncode=0,
+                            ),
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            ),
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    fake_client = FakeGitHubClient(
+                        issue_number=6,
+                        title="Run start phase",
+                        labels=["shinobi:working"],
+                    )
+
+                    def start_mission_side_effect(**kwargs):
+                        fake_client.create_issue_comment(
+                            6,
+                            render_start_comment(
+                                issue_number=6,
+                                branch=started_mission.branch,
+                                lease_expires_at=started_mission.lease_expires_at,
+                                agent_identity=kwargs["config"].agent_identity,
+                                run_id=kwargs["run_id"],
+                            ),
+                        )
+                        store.save_state(
+                            State(
+                                issue_number=6,
+                                pr_number=None,
+                                branch=started_mission.branch,
+                                agent_identity=kwargs["config"].agent_identity,
+                                run_id=kwargs["run_id"],
+                                phase="start",
+                                review_loop_count=0,
+                                retryable_local_only=False,
+                                lease_expires_at=started_mission.lease_expires_at,
+                                last_result="started",
+                                last_error=None,
+                            )
+                        )
+                        return started_mission
+
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    side_effect=start_mission_side_effect,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.GitHubClient",
+                                            return_value=fake_client,
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.load_publishable_issue_label_names",
+                                                return_value={"shinobi:working"},
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.detect_high_risk_stop",
+                                                    return_value=None,
+                                                ):
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                        return_value=published_mission,
+                                                    ) as publish_mock:
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("published_pr: #31", output.getvalue())
+            publish_mock.assert_called_once()
+            saved_state = store.load_state()
+            self.assertIn("self_review", saved_state.extra)
+            self.assertEqual(saved_state.extra["self_review"]["status"], "recorded")
+            self.assertEqual(
+                saved_state.extra["self_review"]["template_path"],
+                ".shinobi/templates/self-review.md",
+            )
+            self.assertGreater(saved_state.extra["self_review"]["checklist_item_count"], 0)
+            self.assertEqual(
+                saved_state.extra["self_review"]["verification"]["change_summary"],
+                "Changed auth flow.",
+            )
+
+    def test_run_hands_off_when_self_review_template_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    store.paths.self_review_template_path.write_text(
+                        "# invalid self review\n",
+                        encoding="utf-8",
+                    )
+                    output = io.StringIO()
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+                    fake_client = FakeGitHubClient(
+                        issue_number=6,
+                        title="Run start phase",
+                        labels=["shinobi:working"],
+                    )
+
+                    def start_mission_side_effect(**kwargs):
+                        fake_client.create_issue_comment(
+                            6,
+                            render_start_comment(
+                                issue_number=6,
+                                branch=started_mission.branch,
+                                lease_expires_at=started_mission.lease_expires_at,
+                                agent_identity=kwargs["config"].agent_identity,
+                                run_id=kwargs["run_id"],
+                            ),
+                        )
+                        store.save_state(
+                            State(
+                                issue_number=6,
+                                pr_number=None,
+                                branch=started_mission.branch,
+                                agent_identity=kwargs["config"].agent_identity,
+                                run_id=kwargs["run_id"],
+                                phase="start",
+                                review_loop_count=0,
+                                retryable_local_only=False,
+                                lease_expires_at=started_mission.lease_expires_at,
+                                last_result="started",
+                                last_error=None,
+                            )
+                        )
+                        return started_mission
+
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    side_effect=start_mission_side_effect,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        return_value=execution_result,
+                                    ):
+                                        with patch(
+                                            "shinobi.cli.GitHubClient",
+                                            return_value=fake_client,
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.handoff_started_mission"
+                                            ) as handoff_mock:
+                                                with patch(
+                                                    "shinobi.cli.publish_mission"
+                                                ) as publish_mock:
+                                                    with redirect_stdout(output):
+                                                        exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "run aborted: Shinobi failed during self-review before publish: "
+                "self-review template does not contain checklist items",
+                output.getvalue(),
+            )
+            handoff_mock.assert_called_once()
+            self.assertIn(
+                "self-review template does not contain checklist items",
+                handoff_mock.call_args.kwargs["reason"],
+            )
+            publish_mock.assert_not_called()
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_execute_heartbeat_updates_start_state_and_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    output = io.StringIO()
+                    fake_client = FakeGitHubClient(
+                        issue_number=6,
+                        title="Run start phase",
+                        labels=["shinobi:working"],
+                    )
+                    fake_client.create_issue_comment(
+                        6,
+                        render_start_comment(
+                            issue_number=6,
+                            branch="feature/issue-6-run-start-phase",
+                            lease_expires_at="2026-04-09T00:30:00Z",
+                            agent_identity="owner/repo#default@test",
+                            run_id="old-run",
+                        ),
+                    )
+                    started_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    published_mission = Mock(
+                        branch="feature/issue-6-run-start-phase",
+                        issue_number=6,
+                        pr_number=31,
+                        pr_url="https://github.com/owner/repo/pull/31",
+                        lease_expires_at="2026-04-09T00:30:00Z",
+                    )
+                    execution_result = ExecutionResult(
+                        commands=[
+                            VerificationCommandResult(
+                                name="test",
+                                command=["python3", "-m", "unittest"],
+                                status="passed",
+                                returncode=0,
+                            )
+                        ],
+                        change_summary="Changed auth flow.",
+                    )
+
+                    def start_mission_side_effect(**kwargs):
+                        store.save_state(
+                            State(
+                                issue_number=6,
+                                pr_number=None,
+                                branch=started_mission.branch,
+                                agent_identity=kwargs["config"].agent_identity,
+                                run_id=kwargs["run_id"],
+                                phase="start",
+                                review_loop_count=0,
+                                retryable_local_only=False,
+                                lease_expires_at=started_mission.lease_expires_at,
+                                last_result="started",
+                                last_error=None,
+                            )
+                        )
+                        return started_mission
+
+                    def execute_verification_side_effect(*args, **kwargs):
+                        kwargs["heartbeat"]()
+                        kwargs["heartbeat"]()
+                        return execution_result
+
+                    with patch("shinobi.cli.list_open_issues_with_any_label", return_value=[]):
+                        with patch("shinobi.cli.select_ready_issue", return_value=6):
+                            with patch(
+                                "shinobi.cli.load_issue",
+                                return_value={"number": 6, "title": "Run start phase"},
+                            ):
+                                with patch(
+                                    "shinobi.cli.start_mission",
+                                    side_effect=start_mission_side_effect,
+                                ):
+                                    with patch(
+                                        "shinobi.cli.execute_verification",
+                                        side_effect=execute_verification_side_effect,
+                                    ) as execute_mock:
+                                        with patch(
+                                            "shinobi.cli.GitHubClient",
+                                            return_value=fake_client,
+                                        ):
+                                            with patch(
+                                                "shinobi.cli.load_publishable_issue_label_names",
+                                                return_value={"shinobi:working"},
+                                            ):
+                                                with patch(
+                                                    "shinobi.cli.detect_high_risk_stop",
+                                                    return_value=None,
+                                                ):
+                                                    with patch(
+                                                        "shinobi.cli.publish_mission",
+                                                        return_value=published_mission,
+                                                    ):
+                                                        with redirect_stdout(output):
+                                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(execute_mock.called)
+            self.assertEqual(len(fake_client.comments), 1)
+            self.assertIn("phase: start", fake_client.comments[0]["body"])
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "start")
+            self.assertNotEqual(saved_state.lease_expires_at, "2026-04-09T00:30:00Z")
+            lock = store.load_lock()
+            self.assertIsNone(lock)
 
     def test_run_hands_off_when_high_risk_paths_are_detected_before_publish(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -7425,6 +7774,35 @@ class ExecutorTest(unittest.TestCase):
             [call.args[0] for call in run_mock.call_args_list],
             [["lint-command"], ["typecheck-command"], ["test-command"]],
         )
+
+    def test_execute_verification_calls_heartbeat_before_each_command(self) -> None:
+        config = Config(
+            repo="owner/repo",
+            verification_commands={
+                "lint": ["lint-command"],
+                "typecheck": ["typecheck-command"],
+                "test": ["test-command"],
+            },
+        )
+        responses = [
+            subprocess.CompletedProcess(args=["lint-command"], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=["typecheck-command"], returncode=0, stdout="", stderr=""),
+            subprocess.CompletedProcess(args=["test-command"], returncode=0, stdout="", stderr=""),
+        ]
+        heartbeats: list[str] = []
+
+        def heartbeat() -> None:
+            heartbeats.append("tick")
+
+        with patch("shinobi.executor.subprocess.run", side_effect=responses):
+            result = execute_verification(
+                Path("/tmp/repo"),
+                config,
+                heartbeat=heartbeat,
+            )
+
+        self.assertTrue(result.succeeded)
+        self.assertEqual(heartbeats, ["tick", "tick", "tick"])
 
     def test_collect_changed_paths_wraps_git_failures(self) -> None:
         with patch(

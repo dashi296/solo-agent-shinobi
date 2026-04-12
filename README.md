@@ -77,7 +77,7 @@ shinobi review
 
 `watch` などの後続コマンドは将来候補です。
 
-現在の実装では foundations に加えて、`shinobi run` / `shinobi run --issue <id>` の select / start / publish phase と、`shinobi review` の CI polling / retry / auto-merge 判定が動作します。Issue 選択、`.shinobi/run.lock` によるローカル排他、`feature/issue-<id>-<slug>` branch 作成、start 用の machine-readable comment 投稿、検証コマンド実行、branch push、draft PR 作成または更新、publish 用の label / mission-state comment 更新、review phase の CI 待機、retry state 保存、安全条件を満たす PR の squash merge と finalize まで実装済みです。context builder の run phase 統合と、AI による review loop の自動修正は未実装です。
+現在の実装では foundations に加えて、`shinobi run` / `shinobi run --issue <id>` の select / start / publish phase と、`shinobi review` の CI polling / retry / auto-merge 判定が動作します。Issue 選択、`.shinobi/run.lock` によるローカル排他、`feature/issue-<id>-<slug>` branch 作成、start 用の machine-readable comment 投稿、execute 中の heartbeat 更新、検証コマンド実行、publish 前 self-review 記録、branch push、draft PR 作成または更新、publish 用の label / mission-state comment 更新、review phase の CI 待機、retry state 保存、安全条件を満たす PR の squash merge と finalize まで実装済みです。context builder の run phase 統合と、AI による review loop の自動修正は未実装です。
 
 ## ドキュメント構成
 
@@ -88,4 +88,4 @@ shinobi review
 
 ## 現在の状態
 
-このリポジトリは foundations 実装に加え、`run` の start / publish phase、`review` の CI polling / retry / merge 判定、context builder を持ちます。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示と GitHub 照合、`run` の issue 選択、stale/live lock 判定、branch 作成、start 用 comment 投稿、GitHub label の start 遷移、検証コマンド実行、branch push、draft PR 作成または更新、publish 用 comment / label / state 更新、review 用の CI 状態取得、retry state 保存、安全条件を満たす PR の squash merge、finalize、Issue 由来の最小 context 構築までを持ちます。context phase の run 統合と、AI による review loop の自動修正はこれから実装します。
+このリポジトリは foundations 実装に加え、`run` の start / publish phase、`review` の CI polling / retry / merge 判定、context builder を持ちます。現在は `.shinobi/` の初期化、ローカル state/config の保存、`status` のローカル表示と GitHub 照合、`run` の issue 選択、stale/live lock 判定、branch 作成、start 用 comment 投稿、GitHub label の start 遷移、execute 中の heartbeat 更新、検証コマンド実行、publish 前 self-review 記録、branch push、draft PR 作成または更新、publish 用 comment / label / state 更新、review 用の CI 状態取得、retry state 保存、安全条件を満たす PR の squash merge、finalize、Issue 由来の最小 context 構築までを持ちます。context phase の run 統合と、AI による review loop の自動修正はこれから実装します。
