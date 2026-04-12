@@ -704,20 +704,13 @@ def upsert_publish_comment(
         agent_identity=agent_identity,
         run_id=run_id,
     )
-    try:
-        comment = find_mission_state_comment(
-            client.list_issue_comments(issue_number),
-            issue_number=issue_number,
-            branch=branch,
-        )
-        if comment is None:
-            client.create_issue_comment(issue_number, body)
-            return
-        client.update_issue_comment(int(comment["id"]), body)
-    except (GitHubClientError, KeyError, TypeError, ValueError) as error:
-        raise MissionPublishError(
-            f"failed to upsert mission-state comment for issue #{issue_number}: {error}"
-        ) from error
+    upsert_mission_state_comment(
+        client=client,
+        issue_number=issue_number,
+        branch=branch,
+        body=body,
+        error_prefix="failed to upsert mission-state comment",
+    )
 
 
 def upsert_review_comment(
@@ -738,20 +731,13 @@ def upsert_review_comment(
         agent_identity=agent_identity,
         run_id=run_id,
     )
-    try:
-        comment = find_mission_state_comment(
-            client.list_issue_comments(issue_number),
-            issue_number=issue_number,
-            branch=branch,
-        )
-        if comment is None:
-            client.create_issue_comment(issue_number, body)
-            return
-        client.update_issue_comment(int(comment["id"]), body)
-    except (GitHubClientError, KeyError, TypeError, ValueError) as error:
-        raise MissionPublishError(
-            f"failed to upsert review mission-state comment for issue #{issue_number}: {error}"
-        ) from error
+    upsert_mission_state_comment(
+        client=client,
+        issue_number=issue_number,
+        branch=branch,
+        body=body,
+        error_prefix="failed to upsert review mission-state comment",
+    )
 
 
 def upsert_publish_failure_comment(
@@ -774,6 +760,23 @@ def upsert_publish_failure_comment(
         run_id=run_id,
         reason=reason,
     )
+    upsert_mission_state_comment(
+        client=client,
+        issue_number=issue_number,
+        branch=branch,
+        body=body,
+        error_prefix="failed to upsert publish failure comment",
+    )
+
+
+def upsert_mission_state_comment(
+    *,
+    client: GitHubClient,
+    issue_number: int,
+    branch: str,
+    body: str,
+    error_prefix: str,
+) -> None:
     try:
         comment = find_mission_state_comment(
             client.list_issue_comments(issue_number),
@@ -785,9 +788,7 @@ def upsert_publish_failure_comment(
             return
         client.update_issue_comment(int(comment["id"]), body)
     except (GitHubClientError, KeyError, TypeError, ValueError) as error:
-        raise MissionPublishError(
-            f"failed to upsert publish failure comment for issue #{issue_number}: {error}"
-        ) from error
+        raise MissionPublishError(f"{error_prefix} for issue #{issue_number}: {error}") from error
 
 
 def find_mission_state_comment(
@@ -833,19 +834,19 @@ def render_publish_comment(
     agent_identity: str,
     run_id: str,
 ) -> str:
-    return (
-        "<!-- shinobi:mission-state\n"
-        f"issue: {issue_number}\n"
-        f"branch: {branch}\n"
-        "phase: publish\n"
-        f"pr: {pr_number}\n"
-        f"lease_expires_at: {lease_expires_at}\n"
-        f"agent_identity: {agent_identity}\n"
-        f"run_id: {run_id}\n"
-        "-->\n"
-        "Shinobi Publish\n\n"
-        f"任務 #{issue_number} の PR を公開しました。\n"
-        f"- pr: #{pr_number}\n"
+    return render_mission_state_comment(
+        issue_number=issue_number,
+        branch=branch,
+        phase="publish",
+        pr_number=pr_number,
+        lease_expires_at=lease_expires_at,
+        agent_identity=agent_identity,
+        run_id=run_id,
+        title="Shinobi Publish",
+        body_lines=(
+            f"任務 #{issue_number} の PR を公開しました。",
+            f"- pr: #{pr_number}",
+        ),
     )
 
 
@@ -859,20 +860,20 @@ def render_publish_failure_state_comment(
     run_id: str,
     reason: str,
 ) -> str:
-    return (
-        "<!-- shinobi:mission-state\n"
-        f"issue: {issue_number}\n"
-        f"branch: {branch}\n"
-        "phase: publish\n"
-        f"pr: {pr_number}\n"
-        f"lease_expires_at: {lease_expires_at}\n"
-        f"agent_identity: {agent_identity}\n"
-        f"run_id: {run_id}\n"
-        "-->\n"
-        "Shinobi Publish Handoff\n\n"
-        f"任務 #{issue_number} の publish 中に人手対応が必要になりました。\n"
-        f"- pr: #{pr_number}\n"
-        f"- reason: {reason}\n"
+    return render_mission_state_comment(
+        issue_number=issue_number,
+        branch=branch,
+        phase="publish",
+        pr_number=pr_number,
+        lease_expires_at=lease_expires_at,
+        agent_identity=agent_identity,
+        run_id=run_id,
+        title="Shinobi Publish Handoff",
+        body_lines=(
+            f"任務 #{issue_number} の publish 中に人手対応が必要になりました。",
+            f"- pr: #{pr_number}",
+            f"- reason: {reason}",
+        ),
     )
 
 
@@ -885,17 +886,44 @@ def render_review_comment(
     agent_identity: str,
     run_id: str,
 ) -> str:
-    return (
+    return render_mission_state_comment(
+        issue_number=issue_number,
+        branch=branch,
+        phase="review",
+        pr_number=pr_number,
+        lease_expires_at=lease_expires_at,
+        agent_identity=agent_identity,
+        run_id=run_id,
+        title="Shinobi Review",
+        body_lines=(
+            f"任務 #{issue_number} の review を継続しています。",
+            f"- pr: #{pr_number}",
+        ),
+    )
+
+
+def render_mission_state_comment(
+    *,
+    issue_number: int,
+    branch: str,
+    phase: str,
+    pr_number: int,
+    lease_expires_at: str,
+    agent_identity: str,
+    run_id: str,
+    title: str,
+    body_lines: tuple[str, ...],
+) -> str:
+    marker = (
         "<!-- shinobi:mission-state\n"
         f"issue: {issue_number}\n"
         f"branch: {branch}\n"
-        "phase: review\n"
+        f"phase: {phase}\n"
         f"pr: {pr_number}\n"
         f"lease_expires_at: {lease_expires_at}\n"
         f"agent_identity: {agent_identity}\n"
         f"run_id: {run_id}\n"
         "-->\n"
-        "Shinobi Review\n\n"
-        f"任務 #{issue_number} の review を継続しています。\n"
-        f"- pr: #{pr_number}\n"
     )
+    body = "\n".join(body_lines)
+    return f"{marker}{title}\n\n{body}\n"

@@ -40,6 +40,10 @@ from shinobi.mission_publish import (
     find_mission_state_comment,
     parse_mission_state_fields,
     publish_mission,
+    render_publish_comment,
+    render_publish_failure_state_comment,
+    render_review_comment,
+    upsert_review_comment,
 )
 from shinobi.mission_start import (
     MissionStartError,
@@ -6389,6 +6393,85 @@ class MissionPublishTest(unittest.TestCase):
         )
 
         self.assertIsNone(comment)
+
+    def test_upsert_review_comment_updates_matching_mission_state_comment(self) -> None:
+        client = FakeGitHubClient(
+            issue_number=31,
+            title="[TASK] publish phase を実装する",
+            labels=["shinobi:reviewing"],
+        )
+        client.comments.append(
+            {
+                "id": 101,
+                "body": (
+                    "<!-- shinobi:mission-state\n"
+                    "issue: 31\n"
+                    "branch: feature/issue-31-publish-phase\n"
+                    "phase: publish\n"
+                    "pr: 44\n"
+                    "-->\n"
+                    "Shinobi Publish\n"
+                ),
+            }
+        )
+
+        upsert_review_comment(
+            client=client,
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            pr_number=44,
+            lease_expires_at="2026-04-09T00:30:00Z",
+            agent_identity="agent-1",
+            run_id="run-123",
+        )
+
+        self.assertEqual(len(client.comments), 1)
+        updated_body = str(client.comments[0]["body"])
+        self.assertIn("phase: review", updated_body)
+        self.assertIn("Shinobi Review", updated_body)
+        self.assertIn("- pr: #44", updated_body)
+
+    def test_render_mission_state_comment_variants_preserve_expected_marker_fields(self) -> None:
+        publish_body = render_publish_comment(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            pr_number=44,
+            lease_expires_at="2026-04-09T00:30:00Z",
+            agent_identity="agent-1",
+            run_id="run-123",
+        )
+        review_body = render_review_comment(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            pr_number=44,
+            lease_expires_at="2026-04-09T00:30:00Z",
+            agent_identity="agent-1",
+            run_id="run-123",
+        )
+        handoff_body = render_publish_failure_state_comment(
+            issue_number=31,
+            branch="feature/issue-31-publish-phase",
+            pr_number=44,
+            lease_expires_at="2026-04-09T00:30:00Z",
+            agent_identity="agent-1",
+            run_id="run-123",
+            reason="push failed",
+        )
+
+        publish_fields = parse_mission_state_fields(publish_body)
+        review_fields = parse_mission_state_fields(review_body)
+        handoff_fields = parse_mission_state_fields(handoff_body)
+
+        self.assertEqual(publish_fields["phase"], "publish")
+        self.assertEqual(review_fields["phase"], "review")
+        self.assertEqual(handoff_fields["phase"], "publish")
+        self.assertEqual(publish_fields["pr"], "44")
+        self.assertEqual(review_fields["pr"], "44")
+        self.assertEqual(handoff_fields["pr"], "44")
+        self.assertIn("Shinobi Publish", publish_body)
+        self.assertIn("Shinobi Review", review_body)
+        self.assertIn("Shinobi Publish Handoff", handoff_body)
+        self.assertIn("- reason: push failed", handoff_body)
 
     def test_publish_mission_hands_off_when_pr_lookup_fails_after_push(self) -> None:
         store = Mock()
