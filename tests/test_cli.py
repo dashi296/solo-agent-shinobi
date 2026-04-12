@@ -5747,6 +5747,101 @@ class MissionPublishTest(unittest.TestCase):
             self.assertIsNotNone(lock)
             self.assertEqual(lock.heartbeat_at, "2026-04-09T00:00:00Z")
 
+    def test_publish_mission_preserves_start_phase_extra_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+            store = StateStore(root)
+            config, _ = store.try_load_config()
+            self.assertIsNotNone(config)
+            run_id = "run-123"
+            now = datetime(2026, 4, 9, 0, 0, tzinfo=timezone.utc)
+            lock_started_at = datetime(2026, 4, 8, 23, 0, tzinfo=timezone.utc)
+            store.acquire_lock(config=config, run_id=run_id, pid=123, now=lock_started_at)
+            store.save_state(
+                cli.State(
+                    issue_number=31,
+                    pr_number=None,
+                    branch="feature/issue-31-publish-phase",
+                    agent_identity=config.agent_identity,
+                    run_id=run_id,
+                    phase="start",
+                    retryable_local_only=False,
+                    lease_expires_at="2026-04-09T00:30:00Z",
+                    last_result="started",
+                    extra={
+                        "self_review": {
+                            "status": "recorded",
+                            "template_path": ".shinobi/templates/self-review.md",
+                        }
+                    },
+                )
+            )
+            execution_result = Mock()
+            execution_result.change_summary = "Published mission changes."
+            execution_result.commands = []
+
+            with patch(
+                "shinobi.mission_publish.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=["git", "push", "-u", "origin", "feature/issue-31-publish-phase"],
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+            ):
+                with patch("shinobi.mission_publish.GitHubClient") as client_cls:
+                    client = client_cls.return_value
+                    client.list_pull_requests_by_head.return_value = []
+                    client.create_pull_request.return_value = {
+                        "number": 44,
+                        "url": "https://github.com/owner/repo/pull/44",
+                    }
+                    client.get_issue.return_value = {
+                        "number": 31,
+                        "labels": [
+                            {"name": "shinobi:ready"},
+                            {"name": "shinobi:working"},
+                        ],
+                    }
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 31\n"
+                                "branch: feature/issue-31-publish-phase\n"
+                                "phase: start\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+
+                    publish_mission(
+                        root=root,
+                        store=store,
+                        config=config,
+                        run_id=run_id,
+                        state=store.load_state(),
+                        execution_result=execution_result,
+                        now=now,
+                    )
+
+            state = store.load_state()
+            self.assertEqual(
+                state.extra,
+                {
+                    "self_review": {
+                        "status": "recorded",
+                        "template_path": ".shinobi/templates/self-review.md",
+                    }
+                },
+            )
+
     def test_publish_mission_updates_existing_pr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
