@@ -655,6 +655,11 @@ def handle_successful_ci_review(
         raise ReviewerError(f"failed to load issue #{issue_number} before merge: {error}") from error
 
     pull_request = load_review_pull_request(client=client, pr_number=pr_number)
+    validate_review_pull_request_branch(
+        pull_request=pull_request,
+        state=state,
+        pr_number=pr_number,
+    )
     base_ref = resolve_review_base_ref(pull_request=pull_request, config=config)
     diff_stats = collect_diff_stats(root, base_ref=base_ref)
     changed_paths = collect_paths_against_base_ref(root, base_ref=base_ref)
@@ -805,6 +810,22 @@ def resolve_review_base_ref(
 ) -> str:
     base_ref = pull_request.get("baseRefName")
     return base_ref if isinstance(base_ref, str) and base_ref.strip() else config.main_branch
+
+
+def validate_review_pull_request_branch(
+    *,
+    pull_request: dict[str, Any],
+    state: State,
+    pr_number: int,
+) -> None:
+    branch = require_review_branch(state)
+    head_ref = pull_request.get("headRefName")
+    if not isinstance(head_ref, str) or not head_ref.strip():
+        raise ReviewerError(f"failed to validate PR #{pr_number} head branch before merge")
+    if head_ref != branch:
+        raise ReviewerError(
+            f"PR #{pr_number} head branch {head_ref} does not match mission branch {branch}"
+        )
 
 
 def handle_failed_ci_review(

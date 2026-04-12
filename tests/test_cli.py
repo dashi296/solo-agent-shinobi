@@ -575,6 +575,7 @@ class CliTest(unittest.TestCase):
                     client.get_pull_request.return_value = {
                         "number": 44,
                         "isDraft": True,
+                        "headRefName": "feature/issue-33-review-ci",
                         "baseRefName": "release/1.0",
                     }
                     client.convert_pull_request_to_ready.return_value = {
@@ -705,6 +706,12 @@ class CliTest(unittest.TestCase):
                             {"name": config.labels["risky"]},
                         ],
                     }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
+                    }
                     with patch("shinobi.cli.GitHubClient", return_value=client):
                         with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
                             with patch(
@@ -799,6 +806,12 @@ class CliTest(unittest.TestCase):
                             {"name": config.labels["reviewing"]},
                             {"name": config.labels["blocked"]},
                         ],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
                     }
                     with patch("shinobi.cli.GitHubClient", return_value=client):
                         with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
@@ -895,6 +908,7 @@ class CliTest(unittest.TestCase):
                     client.get_pull_request.return_value = {
                         "number": 44,
                         "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
                         "baseRefName": "main",
                     }
                     with patch("shinobi.cli.GitHubClient", return_value=client):
@@ -991,6 +1005,12 @@ class CliTest(unittest.TestCase):
                         "number": 33,
                         "state": "OPEN",
                         "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
                     }
                     client.merge_pull_request.side_effect = GitHubClientError(
                         "merge blocked by branch protection"
@@ -1092,6 +1112,8 @@ class CliTest(unittest.TestCase):
                     client.get_pull_request.return_value = {
                         "number": 44,
                         "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
                     }
                     with patch("shinobi.cli.GitHubClient", return_value=client):
                         with patch(
@@ -1265,6 +1287,12 @@ class CliTest(unittest.TestCase):
                         "number": 33,
                         "state": "OPEN",
                         "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/issue-33-review-ci",
+                        "baseRefName": "main",
                     }
 
                     def wait_for_ci_side_effect(*_args, **kwargs):
@@ -1947,6 +1975,103 @@ class CliTest(unittest.TestCase):
             client.assert_not_called()
             self.assertEqual(store.load_state().phase, "publish")
             self.assertEqual(store.load_state().last_result, "published")
+            self.assertIsNone(store.load_lock())
+
+    def test_review_aborts_when_pr_head_does_not_match_mission_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [{"name": config.labels["reviewing"]}],
+                    }
+                    client.get_pull_request.return_value = {
+                        "number": 44,
+                        "isDraft": False,
+                        "headRefName": "feature/unexpected-head",
+                        "baseRefName": "main",
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch(
+                            "shinobi.cli.collect_diff_stats",
+                            return_value=DiffStats(
+                                changed_files=2,
+                                added_lines=10,
+                                deleted_lines=3,
+                            ),
+                        ) as collect_diff_stats_mock:
+                            with patch(
+                                "shinobi.cli.wait_for_ci",
+                                return_value=CIStatus(
+                                    checks=[
+                                        PullRequestCheck(
+                                            name="test",
+                                            state="SUCCESS",
+                                            bucket="pass",
+                                        )
+                                    ],
+                                    status="success",
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.load_current_branch",
+                                    return_value="feature/issue-33-review-ci",
+                                ):
+                                    with redirect_stdout(output):
+                                        exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "review aborted: PR #44 head branch feature/unexpected-head "
+                "does not match mission branch feature/issue-33-review-ci",
+                output.getvalue(),
+            )
+            collect_diff_stats_mock.assert_not_called()
+            client.merge_pull_request.assert_not_called()
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "review")
+            self.assertEqual(saved_state.last_result, "review-error")
+            self.assertEqual(
+                saved_state.last_error,
+                "PR #44 head branch feature/unexpected-head "
+                "does not match mission branch feature/issue-33-review-ci",
+            )
             self.assertIsNone(store.load_lock())
 
     def test_review_rejects_invalid_poll_interval_before_side_effects(self) -> None:
