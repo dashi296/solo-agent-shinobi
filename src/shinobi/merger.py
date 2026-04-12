@@ -85,10 +85,11 @@ def merge_pull_request(
     client: GitHubClient,
     pr_number: int,
     config: Config,
+    pull_request: dict[str, Any] | None = None,
 ) -> None:
     try:
-        pull_request = client.get_pull_request(str(pr_number))
-        if pull_request.get("isDraft"):
+        pull_request_payload = pull_request or client.get_pull_request(str(pr_number))
+        if pull_request_payload.get("isDraft"):
             client.convert_pull_request_to_ready(pr_number)
         client.merge_pull_request(
             pr_number,

@@ -647,7 +647,11 @@ def handle_successful_ci_review(
     except GitHubClientError as error:
         raise ReviewerError(f"failed to load issue #{issue_number} before merge: {error}") from error
 
-    diff_stats = collect_diff_stats(root, base_ref=config.main_branch)
+    pull_request = load_review_pull_request(client=client, pr_number=pr_number)
+    diff_stats = collect_diff_stats(
+        root,
+        base_ref=resolve_review_base_ref(pull_request=pull_request, config=config),
+    )
     decision = evaluate_merge(
         config=config,
         state=state,
@@ -710,7 +714,12 @@ def handle_successful_ci_review(
         return 1
 
     try:
-        merge_pull_request(client=client, pr_number=pr_number, config=config)
+        merge_pull_request(
+            client=client,
+            pr_number=pr_number,
+            config=config,
+            pull_request=pull_request,
+        )
     except MergerError as error:
         reason = f"Shinobi stopped auto-merge because {error}."
         finalize_mission(
@@ -759,6 +768,26 @@ def handle_successful_ci_review(
 
     print(f"merge_result: merged ({config.merge_method})")
     return 0
+
+
+def load_review_pull_request(
+    *,
+    client: GitHubClient,
+    pr_number: int,
+) -> dict[str, Any]:
+    try:
+        return client.get_pull_request(str(pr_number))
+    except GitHubClientError as error:
+        raise ReviewerError(f"failed to load PR #{pr_number} before merge: {error}") from error
+
+
+def resolve_review_base_ref(
+    *,
+    pull_request: dict[str, Any],
+    config: Config,
+) -> str:
+    base_ref = pull_request.get("baseRefName")
+    return base_ref if isinstance(base_ref, str) and base_ref.strip() else config.main_branch
 
 
 def handle_failed_ci_review(

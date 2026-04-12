@@ -574,6 +574,7 @@ class CliTest(unittest.TestCase):
                     client.get_pull_request.return_value = {
                         "number": 44,
                         "isDraft": True,
+                        "baseRefName": "release/1.0",
                     }
                     client.convert_pull_request_to_ready.return_value = {
                         "number": 44,
@@ -588,7 +589,7 @@ class CliTest(unittest.TestCase):
                                     added_lines=10,
                                     deleted_lines=3,
                                 ),
-                            ):
+                            ) as collect_diff_stats_mock:
                                 with patch(
                                     "shinobi.cli.wait_for_ci",
                                     return_value=CIStatus(
@@ -630,6 +631,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(wait_for_ci_mock.call_args.kwargs["timeout_seconds"], 30.0)
             self.assertEqual(wait_for_ci_mock.call_args.kwargs["poll_interval_seconds"], 5.0)
             self.assertIsNotNone(wait_for_ci_mock.call_args.kwargs["heartbeat"])
+            collect_diff_stats_mock.assert_called_once_with(root, base_ref="release/1.0")
             self.assertEqual(client.update_issue_comment.call_count, 2)
             self.assertIn("phase: review", client.update_issue_comment.call_args_list[0].args[1])
             self.assertIn("pr: 44", client.update_issue_comment.call_args_list[0].args[1])
