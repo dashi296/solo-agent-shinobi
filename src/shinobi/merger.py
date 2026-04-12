@@ -32,6 +32,8 @@ def evaluate_merge(
     issue: dict[str, Any],
     ci_status: CIStatus,
     diff_stats: DiffStats,
+    high_risk_paths: list[str] | None = None,
+    high_risk_changed_paths: list[str] | None = None,
 ) -> MergeDecision:
     reasons: list[str] = []
     label_names = issue_label_names(issue)
@@ -66,6 +68,14 @@ def evaluate_merge(
         reasons.append(
             "total changed lines "
             f"{diff_stats.total_changed_lines} exceed max_lines_changed {config.max_lines_changed}"
+        )
+
+    if high_risk_paths:
+        joined_paths = ", ".join(high_risk_paths)
+        joined_files = ", ".join(high_risk_changed_paths or [])
+        reasons.append(
+            "changed files match high-risk path(s): "
+            f"{joined_paths} (files: {joined_files})"
         )
 
     if state.review_loop_count >= config.max_review_loops:

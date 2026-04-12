@@ -11,7 +11,13 @@ from typing import Any, Callable, List, Optional
 from urllib.parse import urlparse
 
 from .config import discover_workspace_root
-from .executor import detect_high_risk_stop, execute_verification
+from .executor import (
+    collect_paths_against_base_ref,
+    detect_high_risk_stop,
+    execute_verification,
+    find_high_risk_paths,
+    path_matches_high_risk,
+)
 from .github_client import GitHubClient, GitHubClientError
 from .issue_selector import (
     ensure_open_issue,
@@ -649,9 +655,17 @@ def handle_successful_ci_review(
         raise ReviewerError(f"failed to load issue #{issue_number} before merge: {error}") from error
 
     pull_request = load_review_pull_request(client=client, pr_number=pr_number)
-    diff_stats = collect_diff_stats(
-        root,
-        base_ref=resolve_review_base_ref(pull_request=pull_request, config=config),
+    base_ref = resolve_review_base_ref(pull_request=pull_request, config=config)
+    diff_stats = collect_diff_stats(root, base_ref=base_ref)
+    changed_paths = collect_paths_against_base_ref(root, base_ref=base_ref)
+    high_risk_paths = find_high_risk_paths(
+        changed_paths=changed_paths,
+        high_risk_paths=config.high_risk_paths,
+    )
+    high_risk_changed_paths = sorted(
+        path
+        for path in changed_paths
+        if any(path_matches_high_risk(path, high_risk_path) for high_risk_path in high_risk_paths)
     )
     decision = evaluate_merge(
         config=config,
@@ -659,6 +673,8 @@ def handle_successful_ci_review(
         issue=issue,
         ci_status=ci_status,
         diff_stats=diff_stats,
+        high_risk_paths=high_risk_paths,
+        high_risk_changed_paths=high_risk_changed_paths,
     )
     review_state = build_review_state(
         state=state,
