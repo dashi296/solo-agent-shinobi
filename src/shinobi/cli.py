@@ -1594,11 +1594,36 @@ def recover_stale_active_mission(
             mission_comment=mission_comment,
         )
     except GitHubClientError as error:
-        active_state.last_error = f"failed to update stale recovery mission-state comment: {error}"
-        try:
-            store.save_state(active_state)
-        except OSError:
-            pass
+        message = f"failed to update stale recovery mission-state comment: {error}"
+        store.save_state(
+            State(
+                issue_number=None,
+                pr_number=None,
+                branch=None,
+                agent_identity=config.agent_identity,
+                run_id=None,
+                phase="idle",
+                review_loop_count=0,
+                retryable_local_only=False,
+                lease_expires_at=None,
+                last_result="aborted",
+                last_error=message,
+                last_mission=MissionSummary(
+                    issue_number=issue_number,
+                    pr_number=None,
+                    branch=branch,
+                    phase="start",
+                    conclusion="aborted",
+                ),
+            )
+        )
+        return ActiveMissionRecovery(
+            issue_number=issue_number,
+            abort_message=(
+                f"stale active mission for issue #{issue_number} could not be resumed: "
+                f"{message}"
+            ),
+        )
     return ActiveMissionRecovery(
         issue_number=issue_number,
         started_mission=StartedMission(
@@ -1642,7 +1667,15 @@ def stale_active_mission_recovery_error(
 
     missing_fields = [
         field
-        for field in ("issue", "branch", "phase", "lease_expires_at", "agent_identity", "run_id")
+        for field in (
+            "issue",
+            "branch",
+            "phase",
+            "lease_expires_at",
+            "pr",
+            "agent_identity",
+            "run_id",
+        )
         if not mission_fields.get(field)
     ]
     if missing_fields:

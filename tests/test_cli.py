@@ -3010,7 +3010,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(saved_state.last_result, "resumed-stale-active")
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
-    def test_run_continues_when_stale_recovery_comment_update_fails(self) -> None:
+    def test_run_aborts_when_stale_recovery_comment_update_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
@@ -3046,55 +3046,26 @@ class CliTest(unittest.TestCase):
                     fake_client.update_issue_comment = Mock(
                         side_effect=GitHubClientError("comment update failed")
                     )
-                    execution_result = ExecutionResult(
-                        commands=[
-                            VerificationCommandResult(
-                                name="test",
-                                command=["python3", "-m", "unittest"],
-                                status="passed",
-                                returncode=0,
-                            )
-                        ],
-                        change_summary="Recovered stale start mission.",
-                    )
                     output = io.StringIO()
                     with patch("shinobi.cli.GitHubClient", return_value=fake_client):
-                        with patch("shinobi.issue_selector.GitHubClient", return_value=fake_client):
-                            with patch(
-                                "shinobi.cli.list_open_issues_with_any_label",
-                                return_value=[6],
-                            ):
-                                with patch("shinobi.cli.git_local_branch_exists", return_value=True):
-                                    with patch("shinobi.cli.git_current_branch", return_value=branch):
-                                        with patch(
-                                            "shinobi.cli.execute_verification",
-                                            return_value=execution_result,
-                                        ):
-                                            with patch(
-                                                "shinobi.cli.load_publishable_issue_label_names",
-                                                return_value={config.labels["working"]},
-                                            ):
-                                                with patch(
-                                                    "shinobi.cli.detect_high_risk_stop",
-                                                    return_value=None,
-                                                ):
-                                                    with patch(
-                                                        "shinobi.cli.publish_mission",
-                                                        return_value=Mock(
-                                                            pr_number=31,
-                                                            pr_url=None,
-                                                            lease_expires_at=(
-                                                                "2026-04-09T00:30:00Z"
-                                                            ),
-                                                        ),
-                                                    ) as publish_mock:
-                                                        with redirect_stdout(output):
-                                                            exit_code = cli.main(["run"])
+                        with patch(
+                            "shinobi.cli.list_open_issues_with_any_label",
+                            return_value=[6],
+                        ):
+                            with patch("shinobi.cli.git_local_branch_exists", return_value=True):
+                                with patch("shinobi.cli.git_current_branch", return_value=branch):
+                                    with patch("shinobi.cli.execute_verification") as execute_mock:
+                                        with patch("shinobi.cli.publish_mission") as publish_mock:
+                                            with redirect_stdout(output):
+                                                exit_code = cli.main(["run"])
 
-            self.assertEqual(exit_code, 0)
-            publish_mock.assert_called_once()
+            self.assertEqual(exit_code, 1)
+            self.assertIn("comment update failed", output.getvalue())
+            execute_mock.assert_not_called()
+            publish_mock.assert_not_called()
             saved_state = store.load_state()
-            self.assertEqual(saved_state.phase, "start")
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "aborted")
             self.assertIn("comment update failed", saved_state.last_error or "")
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
@@ -3260,6 +3231,66 @@ class CliTest(unittest.TestCase):
             self.assertEqual(saved_state.last_result, "needs-human")
             self.assertEqual(saved_state.last_mission.issue_number, 6)
             self.assertIsNone(saved_state.last_mission.pr_number)
+            self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
+            self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
+
+    def test_run_cleans_up_stale_active_github_mission_with_missing_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    branch = "feature/issue-6-run-start-phase"
+                    fake_client = FakeGitHubClient(
+                        issue_number=6,
+                        title="Run start phase",
+                        labels=[config.labels["working"]],
+                    )
+                    fake_client.comments.append(
+                        {
+                            "id": 101,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 6\n"
+                                f"branch: {branch}\n"
+                                "phase: start\n"
+                                "lease_expires_at: 2026-04-09T00:00:00Z\n"
+                                f"agent_identity: {config.agent_identity}\n"
+                                "run_id: stale-run\n"
+                                "-->\n"
+                            ),
+                        }
+                    )
+                    output = io.StringIO()
+                    with patch("shinobi.cli.GitHubClient", return_value=fake_client):
+                        with patch(
+                            "shinobi.cli.list_open_issues_with_any_label",
+                            return_value=[6],
+                        ):
+                            with patch("shinobi.cli.git_local_branch_exists", return_value=True):
+                                with patch("shinobi.cli.git_current_branch", return_value=branch):
+                                    with patch("shinobi.cli.execute_verification") as execute_mock:
+                                        with redirect_stdout(output):
+                                            exit_code = cli.main(["run"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn(
+                "mission-state comment is missing required field(s): pr",
+                output.getvalue(),
+            )
+            self.assertIn("moved issue to shinobi:needs-human", output.getvalue())
+            self.assertIn(config.labels["needs_human"], fake_client.issue_labels)
+            self.assertNotIn(config.labels["working"], fake_client.issue_labels)
+            execute_mock.assert_not_called()
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "needs-human")
+            self.assertEqual(saved_state.last_mission.issue_number, 6)
             self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
             self.assertEqual(store.paths.lock_path.read_text(encoding="utf-8"), "")
 
