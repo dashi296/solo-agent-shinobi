@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from .mission_publish import (
     parse_mission_state_fields,
     publish_mission,
     stop_publish_for_blocking_labels,
+    upsert_mission_state_comment,
     upsert_review_comment,
 )
 from .mission_start import (
@@ -43,6 +45,7 @@ from .mission_start import (
     StartedMission,
     handoff_started_mission,
     labels_to_remove_for_transition,
+    render_start_comment,
     resume_local_only_mission,
     start_mission,
 )
@@ -1187,14 +1190,18 @@ def serialize_execution_result(execution_result: ExecutionResult) -> dict[str, A
     return {
         "commands": [
             {
-                "name": command.name,
-                "status": command.status,
-                "returncode": command.returncode,
-                "message": command.message,
+                "name": str(command.name),
+                "status": str(command.status),
+                "returncode": (
+                    command.returncode if isinstance(command.returncode, int) else None
+                ),
+                "message": (
+                    None if command.message is None else str(command.message)
+                ),
             }
             for command in execution_result.commands
         ],
-        "change_summary": execution_result.change_summary,
+        "change_summary": str(execution_result.change_summary),
     }
 
 
@@ -1361,7 +1368,13 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
                         issue=issue,
                         now=now,
                     )
-            execution_result = execute_verification(root, config)
+            execution_result = execute_started_mission(
+                root=root,
+                store=store,
+                config=config,
+                run_id=run_id,
+                started_mission=started_mission,
+            )
             handoff_failed_verification(
                 root=root,
                 store=store,
@@ -1412,6 +1425,209 @@ def command_run(root: Path, issue_number: Optional[int]) -> int:
         return 0
     finally:
         store.clear_lock(run_id)
+
+
+def execute_started_mission(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+) -> ExecutionResult:
+    heartbeat = build_execute_heartbeat(
+        root=root,
+        store=store,
+        config=config,
+        run_id=run_id,
+        started_mission=started_mission,
+    )
+    try:
+        execution_result = execute_verification(
+            root,
+            config,
+            heartbeat=heartbeat,
+        )
+    except (MissionPublishError, RuntimeError, ValueError) as error:
+        reason = f"Shinobi failed during execute phase: {error}"
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason) from error
+
+    try:
+        persist_self_review(
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            execution_result=execution_result,
+        )
+    except (MissionPublishError, OSError, RuntimeError, ValueError) as error:
+        reason = f"Shinobi failed during self-review before publish: {error}"
+        handoff_started_mission(
+            root=root,
+            store=store,
+            config=config,
+            run_id=run_id,
+            started_mission=started_mission,
+            reason=reason,
+        )
+        raise MissionPublishError(reason) from error
+
+    return execution_result
+
+
+def build_execute_heartbeat(
+    *,
+    root: Path,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+) -> Callable[[], None]:
+    client = GitHubClient(root, repo=config.repo)
+
+    def heartbeat() -> None:
+        now = datetime.now(timezone.utc)
+        lease_expires_at = store.format_timestamp(
+            now + timedelta(minutes=config.mission_lease_minutes)
+        )
+        store.refresh_lock_heartbeat(
+            run_id=run_id,
+            agent_identity=config.agent_identity,
+            now=now,
+        )
+
+        state, state_error = store.try_load_state()
+        if state is None:
+            raise RuntimeError(
+                f"failed to load local state during execute heartbeat: {state_error}"
+            )
+
+        if state.phase != "start" or state.issue_number != started_mission.issue_number:
+            state = State(
+                issue_number=started_mission.issue_number,
+                pr_number=None,
+                branch=started_mission.branch,
+                agent_identity=config.agent_identity,
+                run_id=run_id,
+                phase="start",
+                review_loop_count=0,
+                retryable_local_only=False,
+                lease_expires_at=lease_expires_at,
+                last_result="started",
+                last_error=None,
+                last_mission=state.last_mission,
+                extra=state.extra,
+            )
+        else:
+            state = State(
+                issue_number=state.issue_number,
+                pr_number=state.pr_number,
+                branch=state.branch,
+                agent_identity=config.agent_identity,
+                run_id=run_id,
+                phase="start",
+                review_loop_count=state.review_loop_count,
+                retryable_local_only=False,
+                lease_expires_at=lease_expires_at,
+                last_result=state.last_result,
+                last_error=state.last_error,
+                last_mission=state.last_mission,
+                extra=state.extra,
+            )
+        try:
+            store.save_state(state)
+        except OSError as error:
+            raise RuntimeError(
+                f"failed to persist execute heartbeat state for issue "
+                f"#{started_mission.issue_number}: {error}"
+            ) from error
+
+        body = render_start_comment(
+            issue_number=started_mission.issue_number,
+            branch=started_mission.branch,
+            lease_expires_at=lease_expires_at,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
+        )
+        try:
+            upsert_mission_state_comment(
+                client=client,
+                issue_number=started_mission.issue_number,
+                branch=started_mission.branch,
+                body=body,
+                error_prefix="failed to upsert execute mission-state comment",
+            )
+        except MissionPublishError as error:
+            raise RuntimeError(str(error)) from error
+
+    return heartbeat
+
+
+def persist_self_review(
+    *,
+    store: StateStore,
+    config: Config,
+    run_id: str,
+    started_mission: StartedMission,
+    execution_result: ExecutionResult,
+) -> None:
+    state, state_error = store.try_load_state()
+    if state is None:
+        raise RuntimeError(f"failed to load local state before self-review: {state_error}")
+
+    template_path = store.paths.self_review_template_path
+    try:
+        template = template_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RuntimeError(f"failed to read self-review template: {error}") from error
+
+    checklist_items = parse_self_review_checklist(template)
+    if not checklist_items:
+        raise RuntimeError("self-review template does not contain checklist items")
+
+    lease_expires_at = store.format_timestamp(
+        datetime.now(timezone.utc) + timedelta(minutes=config.mission_lease_minutes)
+    )
+    self_review = {
+        "status": "recorded",
+        "template_path": ".shinobi/templates/self-review.md",
+        "checklist_items": checklist_items,
+        "checklist_item_count": len(checklist_items),
+        "verification": serialize_execution_result(execution_result),
+    }
+    store.save_state(
+        State(
+            issue_number=state.issue_number or started_mission.issue_number,
+            pr_number=state.pr_number,
+            branch=state.branch or started_mission.branch,
+            agent_identity=config.agent_identity,
+            run_id=run_id,
+            phase="start",
+            review_loop_count=state.review_loop_count,
+            retryable_local_only=False,
+            lease_expires_at=lease_expires_at,
+            last_result=state.last_result,
+            last_error=state.last_error,
+            last_mission=state.last_mission,
+            extra={**state.extra, "self_review": self_review},
+        )
+    )
+
+
+def parse_self_review_checklist(template: str) -> list[str]:
+    return [
+        match.group(1).strip()
+        for line in template.splitlines()
+        if (match := re.match(r"^- \[[ xX]\]\s+(.*)$", line.strip())) is not None
+    ]
 
 
 def detect_local_mission_conflict(*, state: State, requested_issue: Optional[int]) -> str | None:

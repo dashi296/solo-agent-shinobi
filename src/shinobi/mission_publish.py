@@ -204,6 +204,7 @@ def publish_mission(
         lease_expires_at=lease_expires_at,
         last_result="published",
         last_error=None,
+        extra=state.extra,
     )
     try:
         store.save_state(published_state)

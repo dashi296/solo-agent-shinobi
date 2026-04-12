@@ -121,9 +121,11 @@ src/shinobi/
 MVP の executor は、コード編集 agent の呼び出しではなく verification runner として実装します。
 
 - config の `verification_commands` から `lint`, `typecheck`, `test` を安定順で実行する
+- execute 開始前と各 verification command 実行前に heartbeat callback を呼べる
 - 各コマンドの `status`, `returncode`, `stdout`, `stderr`, `message` を保持する
 - 未定義コマンドは `not_configured` として失敗結果に含める
 - コマンド起動失敗は例外で phase 全体を落とさず `error` 結果として返す
+- publish 前に `.shinobi/templates/self-review.md` を読んだ結果を local state の構造化データとして保持できる
 - 後続の publish / review phase が使えるよう `ExecutionResult` に成功可否と変更要約の土台を持たせる
 
 ### `mission_publish.py`

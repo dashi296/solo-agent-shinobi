@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .models import Config, ExecutionResult, StopDecision, VerificationCommandResult
 
@@ -10,9 +10,19 @@ from .models import Config, ExecutionResult, StopDecision, VerificationCommandRe
 VERIFICATION_ORDER = ("lint", "typecheck", "test")
 
 
-def execute_verification(root: Path, config: Config) -> ExecutionResult:
+def execute_verification(
+    root: Path,
+    config: Config,
+    *,
+    heartbeat: Callable[[], None] | None = None,
+) -> ExecutionResult:
     results = [
-        run_verification_command(root, name, config.verification_commands.get(name, []))
+        run_verification_command(
+            root,
+            name,
+            config.verification_commands.get(name, []),
+            heartbeat=heartbeat,
+        )
         for name in VERIFICATION_ORDER
     ]
     return ExecutionResult(
@@ -200,7 +210,12 @@ def run_verification_command(
     root: Path,
     name: str,
     command: list[str],
+    *,
+    heartbeat: Callable[[], None] | None = None,
 ) -> VerificationCommandResult:
+    if heartbeat is not None:
+        heartbeat()
+
     if not command:
         return VerificationCommandResult(
             name=name,
