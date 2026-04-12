@@ -702,10 +702,10 @@ def handle_successful_ci_review(
                 last_error=reason,
                 ci_status=ci_status,
             ),
-            conclusion="needs-human",
+            conclusion=decision.conclusion,
             reason=reason,
         )
-        print("merge_result: needs-human")
+        print(f"merge_result: {decision.conclusion}")
         print(reason)
         return 1
 

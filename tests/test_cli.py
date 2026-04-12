@@ -743,6 +743,97 @@ class CliTest(unittest.TestCase):
             self.assertEqual(saved_state.last_mission.conclusion, "needs-human")
             self.assertIsNone(store.load_lock())
 
+    def test_review_successful_ci_preserves_blocked_handoff_when_issue_is_human_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            with patch("shinobi.config.discover_repo_slug", return_value="owner/repo"):
+                with patch("pathlib.Path.cwd", return_value=root):
+                    with redirect_stdout(io.StringIO()):
+                        cli.main(["init"])
+
+                    store = StateStore(root)
+                    config, config_error = store.try_load_config()
+                    self.assertIsNotNone(config, config_error)
+                    store.save_state(
+                        State(
+                            issue_number=33,
+                            pr_number=44,
+                            branch="feature/issue-33-review-ci",
+                            agent_identity=config.agent_identity,
+                            run_id="publish-run",
+                            phase="review",
+                            last_result="review-retry",
+                        )
+                    )
+
+                    output = io.StringIO()
+                    client = Mock()
+                    client.list_issue_comments.return_value = [
+                        {
+                            "id": 9001,
+                            "body": (
+                                "<!-- shinobi:mission-state\n"
+                                "issue: 33\n"
+                                "branch: feature/issue-33-review-ci\n"
+                                "phase: review\n"
+                                "pr: 44\n"
+                                "-->\n"
+                            ),
+                        }
+                    ]
+                    client.get_issue.return_value = {
+                        "number": 33,
+                        "state": "OPEN",
+                        "labels": [
+                            {"name": config.labels["reviewing"]},
+                            {"name": config.labels["blocked"]},
+                        ],
+                    }
+                    with patch("shinobi.cli.GitHubClient", return_value=client):
+                        with patch("shinobi.mission_finalize.GitHubClient", return_value=client):
+                            with patch(
+                                "shinobi.cli.collect_diff_stats",
+                                return_value=DiffStats(
+                                    changed_files=2,
+                                    added_lines=10,
+                                    deleted_lines=3,
+                                ),
+                            ):
+                                with patch(
+                                    "shinobi.cli.wait_for_ci",
+                                    return_value=CIStatus(
+                                        checks=[
+                                            PullRequestCheck(
+                                                name="test",
+                                                state="SUCCESS",
+                                                bucket="pass",
+                                            )
+                                        ],
+                                        status="success",
+                                    ),
+                                ):
+                                    with patch(
+                                        "shinobi.cli.load_current_branch",
+                                        return_value="feature/issue-33-review-ci",
+                                    ):
+                                        with redirect_stdout(output):
+                                            exit_code = cli.main(["review"])
+
+            self.assertEqual(exit_code, 1)
+            rendered = output.getvalue()
+            self.assertIn("merge_result: blocked", rendered)
+            self.assertIn(f"has blocking label(s): {config.labels['blocked']}", rendered)
+            client.merge_pull_request.assert_not_called()
+            client.update_issue_labels.assert_any_call(33, add=[config.labels["blocked"]])
+            client.update_issue_labels.assert_any_call(33, remove=[config.labels["reviewing"]])
+
+            saved_state = store.load_state()
+            self.assertEqual(saved_state.phase, "idle")
+            self.assertEqual(saved_state.last_result, "blocked")
+            self.assertEqual(saved_state.last_mission.issue_number, 33)
+            self.assertEqual(saved_state.last_mission.conclusion, "blocked")
+            self.assertIsNone(store.load_lock())
+
     def test_review_successful_ci_finalizes_needs_human_when_merge_command_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -7137,6 +7228,35 @@ class ReviewerTest(unittest.TestCase):
                     "changed files 5 exceed max_changed_files 4",
                     "total changed lines 16 exceed max_lines_changed 10",
                 ],
+            ),
+        )
+
+    def test_evaluate_merge_stops_for_human_stop_labels(self) -> None:
+        config = Config(repo="owner/repo")
+
+        decision = evaluate_merge(
+            config=config,
+            state=State(review_loop_count=0),
+            issue={
+                "number": 34,
+                "labels": [
+                    {"name": "shinobi:reviewing"},
+                    {"name": "shinobi:blocked"},
+                ],
+            },
+            ci_status=CIStatus(
+                checks=[PullRequestCheck(name="test", state="SUCCESS", bucket="pass")],
+                status="success",
+            ),
+            diff_stats=DiffStats(changed_files=1, added_lines=2, deleted_lines=1),
+        )
+
+        self.assertEqual(
+            decision,
+            MergeDecision(
+                should_merge=False,
+                reasons=["issue #34 has blocking label(s): shinobi:blocked"],
+                conclusion="blocked",
             ),
         )
 

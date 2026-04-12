@@ -7,6 +7,8 @@ from .github_client import GitHubClient, GitHubClientError
 from .models import CIStatus, Config, DiffStats, State
 from .reviewer import issue_label_names
 
+BLOCKING_MERGE_LABEL_KEYS = ("blocked", "needs_human")
+
 
 class MergerError(RuntimeError):
     """Raised when merge inputs or operations are unsafe."""
@@ -16,6 +18,7 @@ class MergerError(RuntimeError):
 class MergeDecision:
     should_merge: bool
     reasons: list[str]
+    conclusion: str = "needs-human"
 
     @property
     def can_merge(self) -> bool:
@@ -33,6 +36,7 @@ def evaluate_merge(
     reasons: list[str] = []
     label_names = issue_label_names(issue)
     risky_label = config.labels["risky"]
+    blocking_labels = find_blocking_merge_labels(label_names=label_names, config=config)
 
     if not config.auto_merge:
         reasons.append("auto_merge is disabled in config")
@@ -47,6 +51,11 @@ def evaluate_merge(
             f"issue #{issue['number']} has label {risky_label}, requiring human merge"
         )
 
+    if blocking_labels:
+        reasons.append(
+            f"issue #{issue['number']} has blocking label(s): {', '.join(blocking_labels)}"
+        )
+
     if diff_stats.changed_files > config.max_changed_files:
         reasons.append(
             "changed files "
@@ -59,7 +68,16 @@ def evaluate_merge(
             f"{diff_stats.total_changed_lines} exceed max_lines_changed {config.max_lines_changed}"
         )
 
-    return MergeDecision(should_merge=not reasons, reasons=reasons)
+    conclusion = "blocked" if config.labels["blocked"] in blocking_labels else "needs-human"
+    return MergeDecision(should_merge=not reasons, reasons=reasons, conclusion=conclusion)
+
+
+def find_blocking_merge_labels(*, label_names: set[str], config: Config) -> list[str]:
+    return sorted(
+        config.labels[key]
+        for key in BLOCKING_MERGE_LABEL_KEYS
+        if key in config.labels and config.labels[key] in label_names
+    )
 
 
 def merge_pull_request(
